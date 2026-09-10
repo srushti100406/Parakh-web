@@ -1,1205 +1,1148 @@
-// PARAKH - National Sovereign Registry Portal Engine & Web UI Application Logic
+/**
+ * PARAKH Admin Portal — Single-Page Application
+ *
+ * Architecture: vanilla JS SPA, no framework, Vite bundler.
+ * All data comes from the FastAPI backend — no fake/demo data.
+ * Authentication: Supabase session token (obtained via /api/auth/login).
+ * Role enforcement: server-side via get_current_admin() dependency.
+ */
 
-import {
-  INITIAL_OFFICER_PROFILE,
-  RECENT_INSPECTIONS,
-  INITIAL_EXTRACTED_FIELDS,
-  INITIAL_DOSSIERS,
-  AUDIT_CHECKS
-} from './data.js';
+import './style.css';
+import * as api from './api.js';
 
-// Application State
+// ── Router / App state ───────────────────────────────────────────────────────
+
 const state = {
-  isLoggedIn: true,
-  currentView: 'dashboard', // auth, dashboard, dossier, queue, profile
-  officer: { ...INITIAL_OFFICER_PROFILE },
-  inspections: [...RECENT_INSPECTIONS],
-  extractedFields: JSON.parse(JSON.stringify(INITIAL_EXTRACTED_FIELDS)),
-  dossiers: [...INITIAL_DOSSIERS],
-  auditChecks: [...AUDIT_CHECKS],
-  activeDossierFilter: 'ALL', // ALL, OPEN, UNDER_REVIEW, RESOLVED
-  selectedDossierId: 'PRAK-2026-002',
-  searchQuery: '',
-  telemetryProgress: 75,
-  telemetryInterval: null,
-  activeInspectionImage: '/assets/shakti_bhog_atta.jpg',
-  activeInspectionName: 'Fortified Atta 5kg',
-  assignModalDossier: null,
-  notificationCount: 3,
-  toastMessage: null
+  view: 'login',          // login | dashboard | inspectors | inspector-detail | create-inspector | inspections | inspection-detail | complaints
+  adminUser: null,        // { user_id, email }
+  params: {},             // view-specific params (e.g. inspector id, inspection id)
+  topbarSearch: '',
 };
 
-// Render Router
-function render() {
-  const app = document.getElementById('app');
-  if (!app) return;
+function navigate(view, params = {}) {
+  state.view = view;
+  state.params = params;
+  render();
+}
 
-  if (!state.isLoggedIn) {
-    app.innerHTML = renderAuthView();
-    bindAuthEvents();
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function initials(name) {
+  if (!name) return '?';
+  return name.trim().split(/\s+/).map(w => w[0]).join('').toUpperCase().slice(0, 2);
+}
+
+function fmtDate(val) {
+  if (!val) return '—';
+  try { return new Date(val).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }); } catch { return val; }
+}
+
+function fmtDateTime(val) {
+  if (!val) return '—';
+  try { return new Date(val).toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }); } catch { return val; }
+}
+
+function statusBadge(status) {
+  if (!status) return `<span class="badge badge-grey">—</span>`;
+  const s = status.toUpperCase();
+  if (s === 'COMPLIANT') return `<span class="badge badge-green">✓ Compliant</span>`;
+  if (s === 'NON_COMPLIANT') return `<span class="badge badge-red">✗ Non-Compliant</span>`;
+  if (s === 'PENDING_ML' || s === 'PROCESSING') return `<span class="badge badge-amber">⏳ Processing</span>`;
+  if (s === 'CREATED' || s === 'CAPTURING') return `<span class="badge badge-blue">📷 Capturing</span>`;
+  if (s === 'COMPLIANCE_READY' || s === 'EXTRACTED') return `<span class="badge badge-blue">🔍 Review</span>`;
+  if (s === 'FAILED') return `<span class="badge badge-red">✗ Failed</span>`;
+  return `<span class="badge badge-grey">${status}</span>`;
+}
+
+function activeBadge(active) {
+  return active
+    ? `<span class="badge badge-green">Active</span>`
+    : `<span class="badge badge-grey">Inactive</span>`;
+}
+
+function escHtml(str) {
+  if (!str) return '';
+  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── Toast ─────────────────────────────────────────────────────────────────────
+
+function toast(msg, type = 'info') {
+  const c = document.getElementById('toast-container');
+  if (!c) return;
+  const el = document.createElement('div');
+  el.className = `toast toast-${type}`;
+  el.textContent = msg;
+  c.appendChild(el);
+  setTimeout(() => el.remove(), 4000);
+}
+
+// ── SVG icons ─────────────────────────────────────────────────────────────────
+
+const I = {
+  home:      `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>`,
+  users:     `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>`,
+  inspect:   `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>`,
+  complaint: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`,
+  logout:    `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>`,
+  plus:      `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>`,
+  eye:       `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`,
+  edit:      `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>`,
+  back:      `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>`,
+  search:    `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>`,
+  refresh:   `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>`,
+};
+
+// ── Sidebar ───────────────────────────────────────────────────────────────────
+
+function renderSidebar() {
+  const nav = (view, icon, label, badge = '') => {
+    const active = state.view === view || (view === 'inspectors' && state.view === 'inspector-detail') || (view === 'inspectors' && state.view === 'create-inspector') || (view === 'inspections' && state.view === 'inspection-detail');
+    return `<div class="nav-item ${active ? 'active' : ''}" data-nav="${view}">
+      ${icon}<span>${label}</span>${badge ? `<span class="nav-badge">${badge}</span>` : ''}
+    </div>`;
+  };
+
+  const adm = state.adminUser;
+  const name = adm?.name || adm?.email || 'Admin';
+
+  return `
+  <aside class="sidebar">
+    <div class="sidebar-brand">
+      <div class="brand-row">
+        <div class="brand-badge">P</div>
+        <div>
+          <div class="brand-title">PARAKH</div>
+          <div class="brand-sub">ADMIN PORTAL</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="sidebar-admin-card">
+      <div class="admin-avatar">${initials(name)}</div>
+      <div class="admin-name">${escHtml(name)}</div>
+      <span class="admin-role-badge">ADMIN</span>
+    </div>
+
+    <nav class="sidebar-nav">
+      ${nav('dashboard', I.home, 'Dashboard')}
+      ${nav('inspectors', I.users, 'Inspectors')}
+      ${nav('inspections', I.inspect, 'Inspections')}
+      ${nav('complaints', I.complaint, 'Complaints')}
+    </nav>
+
+    <div class="sidebar-footer">
+      <div class="nav-item" id="sidebar-logout">
+        ${I.logout}<span>Logout</span>
+      </div>
+      <div class="status-dot-row" style="margin-top:10px;">
+        <div class="pulse-dot"></div>
+        <span>BACKEND CONNECTED</span>
+      </div>
+    </div>
+  </aside>`;
+}
+
+// ── Shell (sidebar + topbar + content) ───────────────────────────────────────
+
+function renderShell(content, title = 'PARAKH Admin') {
+  return `
+  <div class="shell">
+    ${renderSidebar()}
+    <div class="main-content">
+      <header class="top-bar">
+        <span class="topbar-title">${escHtml(title)}</span>
+        <div class="topbar-search">
+          ${I.search}
+          <input id="topbar-search-input" placeholder="Search…" value="${escHtml(state.topbarSearch)}" />
+        </div>
+        <button class="topbar-btn" id="topbar-logout" title="Logout">${I.logout}</button>
+      </header>
+      <div class="view-area" id="view-area">
+        ${content}
+      </div>
+    </div>
+  </div>
+  <div id="toast-container" class="toast-container"></div>
+  <div id="modal-root"></div>`;
+}
+
+// ── Loading / Error states ────────────────────────────────────────────────────
+
+function loadingHtml(msg = 'Loading…') {
+  return `<div class="state-box"><div class="spinner spinner-dark" style="width:32px;height:32px;"></div><div class="state-title" style="margin-top:16px;">${msg}</div></div>`;
+}
+
+function errorHtml(msg) {
+  return `<div class="state-box"><div class="state-icon">⚠️</div><div class="state-title">Error</div><div class="state-msg">${escHtml(msg)}</div></div>`;
+}
+
+function emptyHtml(msg) {
+  return `<div class="state-box"><div class="state-icon">📭</div><div class="state-title">No records found</div><div class="state-msg">${escHtml(msg)}</div></div>`;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// VIEW: Login
+// ═══════════════════════════════════════════════════════════════════════════
+
+function renderLogin() {
+  document.getElementById('app').innerHTML = `
+  <div class="auth-page">
+    <div id="toast-container" class="toast-container"></div>
+    <div class="auth-card">
+      <div class="auth-logo">
+        <div class="auth-logo-badge">P</div>
+        <div class="auth-title">PARAKH</div>
+        <div class="auth-subtitle">Admin Portal</div>
+        <div class="auth-gov-badge">🇮🇳 GOVT. OF INDIA</div>
+      </div>
+
+      <div class="auth-form-wrap">
+        <div id="auth-error"></div>
+        <div class="form-group">
+          <label class="form-label">Admin Email</label>
+          <input class="form-input" type="email" id="login-email" placeholder="admin@example.gov.in" autocomplete="email" />
+        </div>
+        <div class="form-group">
+          <label class="form-label">Password</label>
+          <input class="form-input" type="password" id="login-password" placeholder="••••••••" autocomplete="current-password" />
+        </div>
+        <button class="auth-submit-btn" id="login-btn">
+          <span id="login-btn-label">Sign In to Admin Portal</span>
+        </button>
+      </div>
+
+      <div class="auth-notice">
+        Authorized admin access only.<br/>
+        Inspector accounts are created through this portal.<br/>
+        If you need access, contact your system administrator.
+      </div>
+    </div>
+  </div>`;
+
+  document.getElementById('login-btn').addEventListener('click', doLogin);
+  document.getElementById('login-password').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+}
+
+async function doLogin() {
+  const email = document.getElementById('login-email').value.trim();
+  const password = document.getElementById('login-password').value;
+  const errEl = document.getElementById('auth-error');
+  const btn = document.getElementById('login-btn');
+  const lbl = document.getElementById('login-btn-label');
+
+  errEl.innerHTML = '';
+  if (!email || !password) {
+    errEl.innerHTML = `<div class="auth-error">Please enter your email and password.</div>`;
     return;
   }
 
-  app.innerHTML = `
-    <div class="app-container">
-      ${renderSidebar()}
-      <div class="main-wrapper">
-        ${state.currentView === 'dashboard' ? '' : renderHeader()}
-        <main class="view-content" id="view-container">
-          ${renderCurrentView()}
-        </main>
-      </div>
-    </div>
-    ${state.toastMessage ? renderToast() : ''}
-  `;
-
-  bindGlobalEvents();
-  bindCurrentViewEvents();
-}
-
-// 1. Auth View Component
-function renderAuthView() {
-  return `
-    <div class="auth-page">
-      <div class="auth-card-container">
-        <div class="auth-card">
-          <div class="portal-badge">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-            NATIONAL SOVEREIGN REGISTRY PORTAL
-          </div>
-          
-          <div class="emblem-icon-lg">
-            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
-          </div>
-          
-          <h1 class="auth-title">PARAKH</h1>
-          <p class="auth-subtitle">Welcome to Parakh</p>
-          <p class="auth-motto">INSPECT • VERIFY • COMPLY</p>
-          
-          <form id="auth-form" onsubmit="event.preventDefault();">
-            <div class="form-group">
-              <div class="form-label-row">
-                <label class="form-label">OFFICIAL INSPECTOR ID</label>
-                <span class="form-badge">GOV IDENTITY</span>
-              </div>
-              <div class="input-wrapper">
-                <span class="input-icon">
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><line x1="15" y1="8" x2="17" y2="8"/><line x1="15" y1="12" x2="17" y2="12"/></svg>
-                </span>
-                <input type="text" id="input-inspector-id" class="form-input" value="${state.officer.email}" required />
-                <span class="input-suffix" style="color: var(--status-compliant);">
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-                </span>
-              </div>
-            </div>
-
-            <div class="form-group">
-              <div class="form-label-row">
-                <label class="form-label">PASSPHRASE</label>
-                <span class="form-badge">PIN / CRYPTOGRAPHIC KEY</span>
-              </div>
-              <div class="input-wrapper">
-                <span class="input-icon">
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-                </span>
-                <input type="password" id="input-password" class="form-input" value="••••••••••••" required />
-                <span class="input-suffix" id="btn-toggle-password">
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-                </span>
-              </div>
-            </div>
-
-            <div class="form-options">
-              <label class="checkbox-label">
-                <input type="checkbox" checked id="check-remember" style="accent-color: var(--primary-rust);" />
-                <span>Remember session</span>
-              </label>
-              <span style="font-family: var(--font-mono); font-size: 11px; color: var(--text-muted);">12h Token</span>
-            </div>
-
-            <button type="submit" id="btn-submit-login" class="btn-primary">
-              <span>LOGIN</span>
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
-            </button>
-          </form>
-
-          <div class="auth-help-card">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: var(--primary-rust); flex-shrink: 0;"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-            <div>
-              <strong>Need inspector account access?</strong><br/>
-              <span style="font-size: 12px; color: var(--primary-rust);">Contact State Nodal Officer ↗</span>
-            </div>
-          </div>
-
-          <div class="notice-card">
-            <div class="notice-header">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-              STATUTORY COMPLIANCE NOTICE
-            </div>
-            <p>Authorized verification access under Section 42(A) of the National Standards & Audit Act (NSA-2023). Unauthorized login attempts, session interception, or data manipulation are strictly prohibited and subject to legal prosecution.</p>
-            <div style="margin-top: 8px; font-family: var(--font-mono); font-size: 11px; color: var(--primary-rust);">
-              • Node: ${state.officer.security.nodeId} SSL 256-bit GovNet
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  `;
-}
-
-// 2. Sidebar Component
-function renderSidebar() {
-  return `
-    <aside class="sidebar">
-      <div class="sidebar-header">
-        <div class="brand-row">
-          <div class="brand-logo-badge">P</div>
-          <div>
-            <div class="brand-title">PARAKH</div>
-            <div class="brand-sub">GOVT OF INDIA</div>
-          </div>
-        </div>
-      </div>
-
-      <div class="sidebar-officer-card">
-        <div class="officer-avatar">RS</div>
-        <div class="officer-info">
-          <div class="officer-name">${state.officer.name}</div>
-          <div class="officer-id">${state.officer.inspectorId}</div>
-        </div>
-      </div>
-
-      <nav class="sidebar-nav">
-        <a class="nav-item ${state.currentView === 'dashboard' ? 'active' : ''}" data-view="dashboard">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
-          <span>Dashboard</span>
-        </a>
-
-        <a class="nav-item ${state.currentView === 'queue' ? 'active' : ''}" data-view="queue">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
-          <span>Active Dossiers</span>
-          <span class="badge-count">12</span>
-        </a>
-
-        <a class="nav-item ${state.currentView === 'dossier' ? 'active' : ''}" data-view="dossier">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
-          <span>Audit Dossier</span>
-        </a>
-
-        <a class="nav-item ${state.currentView === 'profile' ? 'active' : ''}" data-view="profile">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-          <span>Officer Settings</span>
-        </a>
-      </nav>
-
-      <div class="sidebar-footer">
-        <div class="node-status-row">
-          <div class="pulse-dot"></div>
-          <span>SOVEREIGN NODE ONLINE</span>
-        </div>
-        <div style="font-family: var(--font-mono); font-size: 10px;">NODE: ${state.officer.security.nodeId}</div>
-      </div>
-    </aside>
-  `;
-}
-
-// 3. Top Header Component
-function renderHeader() {
-  return `
-    <header class="top-header">
-      <div class="header-left">
-        <h1 class="page-title">${getHeaderTitle()}</h1>
-      </div>
-
-      <div class="header-search">
-        <input type="text" placeholder="Search products, SKU, complaints..." value="${state.searchQuery}" id="header-search-input" />
-      </div>
-
-      <div class="header-right">
-        <button id="btn-logout" title="Logout Secure Session" style="color: var(--text-muted); cursor: pointer; padding: 6px;">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
-        </button>
-      </div>
-    </header>
-  `;
-}
-
-function getHeaderTitle() {
-  switch (state.currentView) {
-    case 'dashboard': return 'Inspector Command Center';
-    case 'dossier': return 'Legal Metrology Inspection Dossier';
-    case 'queue': return 'State Enforcement Feed & Complaints';
-    case 'profile': return 'Officer Profile & System Controls';
-    default: return 'PARAKH Portal';
-  }
-}
-
-// Render Active View Content
-function renderCurrentView() {
-  switch (state.currentView) {
-    case 'dashboard': return renderDashboardView();
-    case 'dossier': return renderDossierView();
-    case 'queue': return renderQueueView();
-    case 'profile': return renderProfileView();
-    default: return renderDashboardView();
-  }
-}
-
-// VIEW 1: Dashboard View (Screenshots 2 & 3)
-function renderDashboardView() {
-  return `
-    <div class="dashboard-grid">
-      <!-- Officer Header Banner -->
-      <div class="officer-banner">
-        <div class="banner-left">
-          <h2>Good Morning, Inspector</h2>
-        </div>
-      </div>
-
-      <!-- Regulatory Inflow Triage Row -->
-      <div>
-        <div style="font-size: 11px; font-weight: 800; letter-spacing: 0.5px; color: var(--text-muted); text-transform: uppercase; margin-bottom: 12px; display: flex; justify-content: space-between;">
-          <span>REGULATORY INFLOW TRIAGE</span>
-          <span style="color: var(--primary-rust);">Today's Docket</span>
-        </div>
-        
-        <div class="stats-triage-row">
-          <div class="stat-card">
-            <div class="stat-header">
-              <span class="stat-title">TOTAL FILED</span>
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: var(--text-muted);"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/></svg>
-            </div>
-            <div class="stat-val">48</div>
-            <div class="stat-sub">Total Filed Inspections</div>
-          </div>
-
-          <div class="stat-card reviewed">
-            <div class="stat-header">
-              <span class="stat-title">REVIEWED</span>
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: var(--status-compliant);"><polyline points="20 6 9 17 4 12"/></svg>
-            </div>
-            <div class="stat-val">36</div>
-            <div class="stat-sub">Audit Approved</div>
-          </div>
-
-          <div class="stat-card urgent">
-            <div class="stat-header">
-              <span class="stat-title">URGENT</span>
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: var(--status-noncompliant);"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/></svg>
-            </div>
-            <div class="stat-val">12</div>
-            <div class="stat-sub">Pending Field Action</div>
-          </div>
-
-          <div class="stat-card">
-            <div class="stat-header">
-              <span class="stat-title">COMPLIANCE RATE</span>
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: var(--primary-rust);"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/></svg>
-            </div>
-            <div class="stat-val">75%</div>
-            <div class="stat-sub">Pass Threshold</div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Citizen Escalation Banner -->
-      <div class="escalation-banner" data-view="queue">
-        <div class="escalation-left">
-          <div class="icon-box-danger">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
-          </div>
-          <div>
-            <div style="font-size: 15px; font-weight: 800; color: var(--status-noncompliant);">
-              12 Open Complaints • Citizen Escalation Queue
-            </div>
-            <div style="font-size: 12px; color: var(--text-body);">
-              Tap to review consumer grievances, illegal price markup & field escalations →
-            </div>
-          </div>
-        </div>
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: var(--status-noncompliant);"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
-      </div>
-
-      <!-- Recent Inspections List -->
-      <div class="section-card">
-        <div class="section-header">
-          <div class="section-title">
-            <span>RECENT INSPECTIONS</span>
-            <span style="font-size: 11px; padding: 2px 8px; border-radius: 4px; background: var(--bg-cream-dark); color: var(--primary-rust); font-weight: 700;">3 NEW</span>
-          </div>
-          <a class="link-btn" data-view="queue">
-            <span>VIEW LOGBOOK</span>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
-          </a>
-        </div>
-
-        <div class="inspection-list">
-          ${state.inspections.map(item => `
-            <div class="inspection-item-card">
-              <img src="${item.image}" alt="${item.productName}" class="product-thumb" />
-              <div class="inspection-info">
-                <div class="inspection-title-row">
-                  <span class="product-name">${item.productName}</span>
-                  <span class="verdict-tag ${item.verdict.toLowerCase().replace(' ', '-')}">${item.verdict}</span>
-                </div>
-                <div class="inspection-meta">
-                  <span>Batch: ${item.batch} // SKU #${item.sku}</span>
-                  <span>•</span>
-                  <span>${item.date}</span>
-                </div>
-                ${item.violationNotice ? `
-                  <div class="inspection-sub-notice">
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-                    <span>${item.violationNotice}</span>
-                  </div>
-                ` : `
-                  <div style="font-size: 11px; font-weight: 700; color: var(--status-compliant);">
-                    ✓ ${item.rulesTag}
-                  </div>
-                `}
-              </div>
-              <button class="btn-primary btn-view-dossier" data-id="${item.id}" style="width: auto; padding: 8px 16px; font-size: 12px;">
-                <span>View Dossier</span>
-              </button>
-            </div>
-          `).join('')}
-        </div>
-      </div>
-    </div>
-  `;
-}
-
-// VIEW 2: Inspection Studio (Screenshot 4)
-function renderStudioView() {
-  return `
-    <div class="studio-grid">
-      <!-- Camera Scanner Viewfinder -->
-      <div class="viewfinder-card">
-        <div class="viewfinder-header">
-          <div class="ocr-active-pill">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v8M8 12h8"/></svg>
-            <span>OCR ACTIVE 99.4%</span>
-          </div>
-
-          <div style="display: flex; gap: 8px;">
-            <button class="control-btn" title="Grid Overlay">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/><line x1="15" y1="3" x2="15" y2="21"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/></svg>
-            </button>
-            <button class="control-btn" title="Refresh">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
-            </button>
-          </div>
-        </div>
-
-        <div class="viewfinder-stage">
-          <img src="${state.activeInspectionImage}" alt="Product Scan" class="viewfinder-img" id="scanner-viewfinder-img" />
-          
-          <!-- Bounding Boxes Overlays -->
-          <div class="bounding-box" style="top: 140px; left: 40px; width: 180px; height: 35px;">
-            <span class="bounding-tag">✓ FSSAI / RULE 9 RECOGNIZED</span>
-          </div>
-          
-          <div class="bounding-box" style="top: 280px; left: 50px; width: 120px; height: 40px;">
-            <span class="bounding-tag">✓ MRP ₹260.00 PARSED</span>
-          </div>
-        </div>
-
-        <div style="margin-top: 16px; font-size: 13px; color: #FFCC80; font-weight: 600; display: flex; align-items: center; gap: 6px;">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 7h10M7 12h10M7 17h10"/></svg>
-          Align package inside the frame to capture Legal Metrology declarations
-        </div>
-
-        <div class="camera-controls">
-          <button class="control-btn" id="btn-upload-file" title="Upload Image File">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-          </button>
-
-          <button class="control-btn main-scan" id="btn-trigger-scan" title="Start Telemetry Inspection">
-            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="4"/></svg>
-          </button>
-
-          <button class="control-btn" id="btn-toggle-torch" title="Torch Light">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
-          </button>
-        </div>
-
-        <input type="file" id="file-input-hidden" accept="image/*" style="display: none;" />
-      </div>
-
-      <!-- Right Calibration Parameters Panel -->
-      <div class="studio-panel">
-        <div class="params-card">
-          <div style="font-size: 11px; font-weight: 800; letter-spacing: 0.5px; color: var(--text-muted); text-transform: uppercase; margin-bottom: 16px; display: flex; justify-content: space-between;">
-            <span>CALIBRATION PARAMETERS</span>
-            <span style="color: var(--primary-rust);">ISO 17020 ENGINE</span>
-          </div>
-
-          <div class="param-row">
-            <span class="param-label">LINGUISTIC SYNC</span>
-            <span class="param-value">EN / HI</span>
-          </div>
-
-          <div class="param-row">
-            <span class="param-label">TARGET FOCUS</span>
-            <span class="param-value">Rule 9 + FSSAI</span>
-          </div>
-
-          <div class="param-row">
-            <span class="param-label">CONFIDENCE THRESHOLD</span>
-            <span class="param-value" style="color: var(--status-compliant);">99.4%</span>
-          </div>
-
-          <div class="param-row">
-            <span class="param-label">NEURAL MATRIX ENGINE</span>
-            <span class="param-value">v4.2-RELEASE</span>
-          </div>
-        </div>
-
-        <div class="params-card">
-          <h4 style="font-size: 14px; font-weight: 800; color: var(--text-dark); margin-bottom: 8px;">Select Test Sample</h4>
-          <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 14px;">Switch between pre-loaded package samples for verification test:</p>
-
-          <div style="display: flex; flex-direction: column; gap: 8px;">
-            <button class="btn-primary btn-sample-select" data-img="/assets/shakti_bhog_atta.jpg" data-name="Fortified Atta 5kg" style="background: var(--bg-cream); color: var(--text-dark); border: 1px solid var(--card-border); justify-content: flex-start; padding: 10px 14px;">
-              <img src="/assets/shakti_bhog_atta.jpg" style="width: 24px; height: 24px; border-radius: 4px; object-fit: cover;" />
-              <span>Fortified Atta 5kg</span>
-            </button>
-
-            <button class="btn-primary btn-sample-select" data-img="/assets/sunrise_turmeric.jpg" data-name="Sunrise Turmeric Powder 500g" style="background: var(--bg-cream); color: var(--text-dark); border: 1px solid var(--card-border); justify-content: flex-start; padding: 10px 14px;">
-              <img src="/assets/sunrise_turmeric.jpg" style="width: 24px; height: 24px; border-radius: 4px; object-fit: cover;" />
-              <span>Sunrise Turmeric Powder 500g</span>
-            </button>
-
-            <button class="btn-primary btn-sample-select" data-img="/assets/aashirvaad_ghee.jpg" data-name="Aashirvaad Pure Ghee 1L" style="background: var(--bg-cream); color: var(--text-dark); border: 1px solid var(--card-border); justify-content: flex-start; padding: 10px 14px;">
-              <img src="/assets/aashirvaad_ghee.jpg" style="width: 24px; height: 24px; border-radius: 4px; object-fit: cover;" />
-              <span>Aashirvaad Pure Ghee 1L</span>
-            </button>
-          </div>
-        </div>
-
-        <button class="btn-primary" id="btn-run-analysis-now">
-          <span>Run Analysis Pipeline →</span>
-        </button>
-      </div>
-    </div>
-  `;
-}
-
-// VIEW 3: Telemetry View (Screenshot 5)
-function renderTelemetryView() {
-  return `
-    <div class="telemetry-card">
-      <div style="display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; border-radius: var(--radius-pill); background: var(--status-warning-bg); color: var(--status-warning); font-size: 11px; font-weight: 700; margin-bottom: 16px;">
-        <span class="pulse-dot" style="background: var(--status-warning);"></span>
-        <span>TELEMETRY STREAM ACTIVE</span>
-      </div>
-
-      <h2 style="font-size: 26px; font-weight: 800; color: var(--text-dark); margin-bottom: 4px;">Processing</h2>
-      <p style="font-size: 14px; color: var(--text-muted); margin-bottom: 24px;">Analyzing product package information & Legal Metrology declarations...</p>
-
-      <!-- Radial Progress Circle -->
-      <div class="gauge-circle" id="telemetry-gauge">
-        <div class="gauge-inner">
-          <div class="gauge-percent" id="telemetry-percent">${state.telemetryProgress}%</div>
-          <div class="gauge-label">COMPLETED</div>
-          <div style="font-family: var(--font-mono); font-size: 10px; color: var(--primary-rust); font-weight: 700;">CAL-99.82Hz</div>
-        </div>
-      </div>
-
-      <div class="pipeline-stats">
-        <div><span>QUANTUM SCAN INDEX:</span> <strong>2,960 / 4,000 pts</strong></div>
-        <div><span>FPS:</span> <strong>58.4</strong></div>
-        <div><span>OCR:</span> <strong>142 glyphs/sec</strong></div>
-      </div>
-
-      <!-- Audit Protocol Stages Timeline -->
-      <div class="audit-stages-list">
-        <div class="stage-item">
-          <div class="stage-icon">✓</div>
-          <div>
-            <div class="stage-title">1. Image sent to Cloud <span style="font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); margin-left: 8px;">312ms</span></div>
-            <div class="stage-sub">Sovereign cloud gateway node authenticated</div>
-          </div>
-        </div>
-
-        <div class="stage-item">
-          <div class="stage-icon">✓</div>
-          <div>
-            <div class="stage-title">2. Text extraction - OCR <span style="font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); margin-left: 8px;">480ms</span></div>
-            <div class="stage-sub">Lexical parsing & spatial bounding matrices verified</div>
-          </div>
-        </div>
-
-        <div class="stage-item evaluating">
-          <div class="stage-icon">⚙</div>
-          <div>
-            <div class="stage-title">3. Compliance checks <span style="font-size: 10px; padding: 2px 6px; border-radius: 4px; background: var(--status-warning-bg); color: var(--status-warning); font-weight: 700; margin-left: 8px;">EVALUATING</span></div>
-            <div class="stage-sub">Matching Legal Metrology & FSSAI 2026 rules matrix...</div>
-          </div>
-        </div>
-
-        <div class="stage-item queued">
-          <div class="stage-icon">4</div>
-          <div>
-            <div class="stage-title">4. Generating Result <span style="font-size: 10px; padding: 2px 6px; border-radius: 4px; background: var(--bg-cream-dark); color: var(--text-muted); font-weight: 700; margin-left: 8px;">QUEUED</span></div>
-            <div class="stage-sub">Cryptographic seal signature generation</div>
-          </div>
-        </div>
-      </div>
-
-      <div style="background: var(--card-cream-bg); border-radius: var(--radius-md); padding: 14px; margin-bottom: 24px; font-size: 12px; color: var(--text-dark); text-align: left; border-left: 4px solid var(--primary-rust);">
-        <strong>🔒 CRYPTOGRAPHIC AUDIT LOCK</strong><br/>
-        <span style="color: var(--text-muted);">Active cryptographic audit lock: Do not switch background applications. Session payload is anchored with hardware-backed attestation.</span><br/>
-        <span style="font-family: var(--font-mono); font-size: 11px; color: var(--primary-rust);">SESSION: #7FA0-90DC NONCE: 981103</span>
-      </div>
-
-      <button class="btn-primary" id="btn-cancel-telemetry" style="background: transparent; color: var(--status-noncompliant); border: 1px solid var(--status-noncompliant-border); box-shadow: none;">
-        <span>✕ CANCEL FIELD VERIFICATION</span>
-      </button>
-    </div>
-  `;
-}
-
-// VIEW 4: Extraction Review Form (Screenshot 6)
-function renderExtractionView() {
-  return `
-    <div class="extraction-grid">
-      <!-- Left Side: Product Image & OCR Preview -->
-      <div style="display: flex; flex-direction: column; gap: 20px;">
-        <div class="section-card">
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
-            <div style="font-family: var(--font-mono); font-size: 11px; font-weight: 700; color: var(--status-compliant);">
-              ✓ OCR TELEMETRY STREAM • 20/20 CAPTURED
-            </div>
-          </div>
-
-          <div style="position: relative; border-radius: var(--radius-md); overflow: hidden; border: 1px solid var(--card-border);">
-            <img src="${state.activeInspectionImage}" alt="Extracted Package" style="width: 100%; height: 360px; object-fit: cover;" />
-            <div style="position: absolute; bottom: 12px; left: 12px; background: rgba(0,0,0,0.8); color: #FFFFFF; font-family: var(--font-mono); font-size: 11px; padding: 4px 10px; border-radius: 4px;">
-              INTAKE HASH: SHA256/7b19e04cfa12
-            </div>
-          </div>
-        </div>
-
-        <div class="section-card">
-          <h4 style="font-size: 15px; font-weight: 800; color: var(--text-dark); margin-bottom: 8px;">Compliance Actions</h4>
-          <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 16px;">Review all 20 Legal Metrology extracted declarations before finalizing compliance audit verdict.</p>
-
-          <div style="display: flex; flex-direction: column; gap: 12px;">
-            <button class="btn-primary" id="btn-execute-compliance-check">
-              <span>CHECK COMPLIANCE & GENERATE DOSSIER →</span>
-            </button>
-
-            <button class="btn-primary" id="btn-direct-complaint" style="background: #FFFFFF; color: var(--status-noncompliant); border: 1.5px solid var(--status-noncompliant-border); box-shadow: none;">
-              <span>⚠️ FILE COMPLAINT DIRECTLY</span>
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <!-- Right Side: 20 Legal Metrology Extracted Fields Form -->
-      <div class="extracted-form-card">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
-          <div>
-            <h3 style="font-size: 18px; font-weight: 800; color: var(--text-dark);">Please Review the Extracted Information</h3>
-            <p style="font-size: 12px; color: var(--text-muted);">Information detected from package OCR intake</p>
-          </div>
-        </div>
-
-        <form id="extracted-data-form" onsubmit="event.preventDefault();">
-          ${state.extractedFields.map(field => `
-            ${field.section ? `
-              <div style="font-size: 11px; font-weight: 800; letter-spacing: 0.8px; color: var(--primary-rust); text-transform: uppercase; margin: 20px 0 10px; padding-top: 10px; border-top: 2px solid var(--card-cream-bg);">
-                ${field.section}
-              </div>
-            ` : ''}
-            
-            <div class="field-group">
-              <div class="field-label">
-                <span>${field.label}</span>
-                ${field.badge ? `<span style="color: var(--primary-rust); font-weight: 700;">${field.badge}</span>` : ''}
-              </div>
-              
-              <input type="text" class="field-value-input" data-id="${field.id}" value="${field.value}" />
-              
-              ${field.standard ? `
-                <div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">
-                  ${field.standard}
-                </div>
-              ` : ''}
-
-              ${field.warningText ? `
-                <div style="font-size: 11px; font-weight: 700; color: var(--status-warning); margin-top: 4px; display: flex; align-items: center; gap: 4px;">
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/></svg>
-                  ${field.warningText}
-                </div>
-              ` : ''}
-            </div>
-          `).join('')}
-        </form>
-      </div>
-    </div>
-  `;
-}
-
-// VIEW 5: Dossier Report View (Screenshot 7)
-function getSelectedDossier() {
-  return state.dossiers.find(d => d.id === state.selectedDossierId) || state.dossiers[0];
-}
-
-function renderDossierView() {
-  const dossier = getSelectedDossier();
-
-  return `
-    <div style="display: flex; flex-direction: column; gap: 24px;">
-      <!-- Verdict Top Banner -->
-      <div class="dossier-header-banner">
-        <div class="verdict-large-badge">
-          <div class="verdict-icon-lg">✕</div>
-          <div>
-            <div style="font-size: 11px; font-weight: 800; letter-spacing: 1px; color: var(--text-muted); text-transform: uppercase;">VERDICT STATUS</div>
-            <div class="verdict-title">${dossier.status === 'RESOLVED' ? 'RESOLVED' : 'NON-COMPLIANT'}</div>
-            <div class="verdict-subtitle">${dossier.assignedOfficer ? 'FIELD REVIEW ACTIVE' : 'PENALTY RISK: CLASS B'}</div>
-          </div>
-        </div>
-
-        <div class="score-donut-box">
-          <div>
-            <div style="font-size: 11px; font-weight: 800; letter-spacing: 0.5px; color: var(--text-muted);">OVERALL COMPLIANCE INDEX</div>
-            <div style="font-size: 12px; color: var(--text-body);">${dossier.description}</div>
-          </div>
-          <div class="score-num">${dossier.status === 'RESOLVED' ? '94%' : '72%'}</div>
-        </div>
-      </div>
-
-      <!-- Main Dossier Content Split -->
-      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px;">
-        <!-- Left Column: Visual Heatmap & Details -->
-        <div class="section-card">
-          <div class="section-title" style="margin-bottom: 14px;">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: var(--primary-rust);"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-            <span>Highlighted Invalid Information</span>
-            <span style="font-size: 10px; padding: 2px 8px; border-radius: var(--radius-pill); background: var(--status-noncompliant-bg); color: var(--status-noncompliant); font-weight: 800;">1 VIOLATION</span>
-          </div>
-
-          <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 16px;">Audit dossier for ${dossier.title}.</p>
-
-          <!-- Heatmap Image Container -->
-          <div class="heatmap-container">
-            <img src="${dossier.image}" alt="Annotated Heatmap" class="heatmap-img" />
-            
-            <div class="heatmap-callout warning" style="bottom: 25%; right: 15%;">
-              ⚠️ WARNING: Font Height 2.8mm<br/>
-              <span style="font-size: 10px; font-weight: 500;">Required min: 4.0mm</span>
-            </div>
-          </div>
-
-          <div style="margin-top: 20px; font-size: 13px; color: var(--text-body);">
-            <strong>Food Product:</strong> Fortified Wheat Flour (Atta)<br/>
-            <span style="font-size: 12px; color: var(--text-muted);">Statutory Framework: Legal Metrology (Packaged Commodities) Rules 2011 & FSSAI Standards 2026.</span>
-          </div>
-        </div>
-
-        <!-- Right Column: Compliance Audit Checks Matrix -->
-        <div class="section-card">
-          <div class="section-title" style="margin-bottom: 14px;">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: var(--primary-rust);"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
-            <span>Compliance Audit Checks</span>
-            <span style="font-size: 11px; color: var(--text-muted); font-weight: 600;">6 PARAMETERS</span>
-          </div>
-
-          <table class="checks-table">
-            <thead>
-              <tr>
-                <th>Rule Metric</th>
-                <th>Status</th>
-                <th>Reason / Observation</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${state.auditChecks.map(check => `
-                <tr>
-                  <td>
-                    <strong style="color: var(--text-dark);">${check.title}</strong><br/>
-                    <span style="font-size: 11px; color: var(--text-muted);">Det: ${check.detected}</span>
-                  </td>
-                  <td>
-                    <span class="verdict-tag ${check.status.toLowerCase()}">${check.status}</span>
-                  </td>
-                  <td style="font-size: 12px; color: var(--text-body);">
-                    ${check.reason}
-                  </td>
-                </tr>
-              `).join('')}
-            </tbody>
-          </table>
-
-          <!-- SHA256 Audit Registry Box -->
-          <div style="margin-top: 20px; padding: 14px; background: var(--card-cream-bg); border-radius: var(--radius-md); border-left: 4px solid var(--primary-rust);">
-            <div style="font-size: 11px; font-weight: 800; color: var(--primary-rust); letter-spacing: 0.5px;">CERTIFIED AUDIT REGISTRY</div>
-            <div style="font-family: var(--font-mono); font-size: 11px; color: var(--text-dark); word-break: break-all; margin-top: 2px;">
-              HASH: SHA256/7b19e04cfa12
-            </div>
-            <div style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">Authorized enforcement record under Central Enforcement Portal.</div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Action Buttons Row -->
-      <div style="display: flex; gap: 16px; justify-content: flex-end;">
-        <button class="btn-primary" id="btn-print-dossier" style="width: auto; background: var(--bg-cream-dark); color: var(--text-dark); border: 1px solid var(--card-border); box-shadow: none;">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
-          <span>Export PDF / Print</span>
-        </button>
-
-        <button class="btn-primary" id="btn-dossier-file-complaint" style="width: auto; background: var(--status-noncompliant);">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 1 1.71 3h16.94a2 2 0 0 1 1.71-3L13.71 3.86a2 2 0 0 1-3.42 0z"/></svg>
-          <span>File Official Complaint</span>
-        </button>
-
-        <button class="btn-primary" data-view="dashboard" style="width: auto;">
-          <span>← Back to Dashboard</span>
-        </button>
-      </div>
-    </div>
-  `;
-}
-
-// VIEW 6: Enforcement Queue / Active Dossiers (Screenshot 8)
-function renderQueueView() {
-  const totalDossiers = state.dossiers.length;
-  const openCount = state.dossiers.filter(d => d.status === 'OPEN').length;
-  const underReviewCount = state.dossiers.filter(d => d.status === 'UNDER REVIEW').length;
-  const resolvedCount = state.dossiers.filter(d => d.status === 'RESOLVED').length;
-
-  const filtered = state.dossiers.filter(d => {
-    if (state.activeDossierFilter === 'OPEN') return d.status === 'OPEN';
-    if (state.activeDossierFilter === 'UNDER_REVIEW') return d.status === 'UNDER REVIEW';
-    if (state.activeDossierFilter === 'RESOLVED') return d.status === 'RESOLVED';
-    return true;
-  });
-
-  return `
-    <div style="display: flex; flex-direction: column; gap: 20px;">
-      <!-- Queue Header Bar -->
-      <div style="display: flex; justify-content: space-between; align-items: center;">
-        <div>
-          <div style="display: flex; align-items: center; gap: 10px;">
-            <h2 style="font-size: 22px; font-weight: 800; color: var(--text-dark);">State Enforcement Feed</h2>
-            <span style="font-size: 11px; font-weight: 800; padding: 4px 12px; border-radius: var(--radius-pill); background: var(--status-warning-bg); color: var(--status-warning);">${totalDossiers} ACTIVE DOSSIERS</span>
-          </div>
-          <p style="font-size: 12px; color: var(--text-muted);">CENTRAL INTAKE QUEUE • REAL-TIME SYNC (UTC+05:30)</p>
-        </div>
-      </div>
-
-      <!-- Filter Tabs -->
-      <div style="display: flex; gap: 10px; border-bottom: 2px solid var(--card-border); padding-bottom: 10px;">
-        <button class="btn-primary filter-tab ${state.activeDossierFilter === 'ALL' ? 'active-tab' : ''}" data-filter="ALL" style="width: auto; padding: 8px 18px; font-size: 13px; background: ${state.activeDossierFilter === 'ALL' ? 'var(--primary-rust)' : 'var(--bg-cream)'}; color: ${state.activeDossierFilter === 'ALL' ? '#FFF' : 'var(--text-dark)'};">
-          All (${totalDossiers})
-        </button>
-
-        <button class="btn-primary filter-tab ${state.activeDossierFilter === 'OPEN' ? 'active-tab' : ''}" data-filter="OPEN" style="width: auto; padding: 8px 18px; font-size: 13px; background: ${state.activeDossierFilter === 'OPEN' ? 'var(--primary-rust)' : 'var(--bg-cream)'}; color: ${state.activeDossierFilter === 'OPEN' ? '#FFF' : 'var(--text-dark)'};">
-          Open (${openCount})
-        </button>
-
-        <button class="btn-primary filter-tab ${state.activeDossierFilter === 'UNDER_REVIEW' ? 'active-tab' : ''}" data-filter="UNDER_REVIEW" style="width: auto; padding: 8px 18px; font-size: 13px; background: ${state.activeDossierFilter === 'UNDER_REVIEW' ? 'var(--primary-rust)' : 'var(--bg-cream)'}; color: ${state.activeDossierFilter === 'UNDER_REVIEW' ? '#FFF' : 'var(--text-dark)'};">
-          Under Review (${underReviewCount})
-        </button>
-
-        <button class="btn-primary filter-tab ${state.activeDossierFilter === 'RESOLVED' ? 'active-tab' : ''}" data-filter="RESOLVED" style="width: auto; padding: 8px 18px; font-size: 13px; background: ${state.activeDossierFilter === 'RESOLVED' ? 'var(--primary-rust)' : 'var(--bg-cream)'}; color: ${state.activeDossierFilter === 'RESOLVED' ? '#FFF' : 'var(--text-dark)'};">
-          Resolved (${resolvedCount})
-        </button>
-      </div>
-
-      <!-- Dossier List Cards -->
-      <div style="display: flex; flex-direction: column; gap: 16px;">
-        ${filtered.map(dossier => `
-          <div class="section-card" style="border-left: 4px solid ${dossier.priority.includes('HIGH') ? 'var(--status-noncompliant)' : dossier.priority.includes('MEDIUM') ? 'var(--status-warning)' : 'var(--status-compliant)'};">
-            <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px;">
-              <div>
-                <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 4px;">
-                  <span style="font-family: var(--font-mono); font-weight: 700; font-size: 13px; color: var(--primary-rust);">#${dossier.id}</span>
-                  <span style="font-size: 10px; font-weight: 800; padding: 2px 8px; border-radius: 4px; background: var(--bg-cream-dark); color: var(--text-muted);">${dossier.subDiv}</span>
-                  <span class="verdict-tag ${dossier.priority.includes('HIGH') ? 'non-compliant' : dossier.priority.includes('MEDIUM') ? 'warning' : 'compliant'}">${dossier.priority}</span>
-                </div>
-                <h3 style="font-size: 16px; font-weight: 800; color: var(--text-dark);">${dossier.title}</h3>
-              </div>
-
-              <span class="verdict-tag ${dossier.status === 'OPEN' ? 'non-compliant' : dossier.status === 'UNDER REVIEW' ? 'warning' : 'compliant'}">
-                ${dossier.statusText}
-              </span>
-            </div>
-
-            <div style="display: flex; gap: 16px; align-items: center; margin-bottom: 16px;">
-              <img src="${dossier.image}" style="width: 60px; height: 60px; border-radius: 8px; object-fit: cover; border: 1px solid var(--card-border);" />
-              <div style="flex: 1;">
-                <p style="font-size: 13px; color: var(--text-body); margin-bottom: 4px;">⚠️ ${dossier.description}</p>
-                <div style="font-size: 12px; color: var(--text-muted); display: flex; gap: 14px;">
-                  <span>🕒 ${dossier.time}</span>
-                  ${dossier.assignedOfficer ? `<span style="font-weight: 600; color: var(--primary-rust);">👤 ${dossier.assignedOfficer}</span>` : ''}
-                </div>
-              </div>
-            </div>
-
-            <div style="display: flex; justify-content: flex-end; gap: 12px;">
-              <button class="btn-primary btn-view-dossier" data-dossier-id="${dossier.id}" style="width: auto; padding: 8px 16px; background: var(--bg-cream-dark); color: var(--text-dark); border: 1px solid var(--card-border); box-shadow: none;">
-                <span>View Details</span>
-              </button>
-            </div>
-          </div>
-        `).join('')}
-      </div>
-    </div>
-  `;
-}
-
-// VIEW 7: Officer Profile & Settings (Screenshot 9)
-function renderProfileView() {
-  return `
-    <div style="max-width: 720px; margin: 0 auto; display: flex; flex-direction: column; gap: 24px;">
-      <!-- Officer Profile Header Card -->
-      <div class="section-card" style="text-align: center; padding: 32px;">
-        <div style="width: 80px; height: 80px; border-radius: 50%; background: var(--primary-rust); color: #FFFFFF; font-size: 28px; font-weight: 800; display: flex; align-items: center; justify-content: center; margin: 0 auto 16px; border: 3px solid #FFCC80; box-shadow: var(--shadow-md);">
-          RS
-        </div>
-
-        <div style="display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; border-radius: var(--radius-pill); background: var(--status-compliant-bg); color: var(--status-compliant); font-size: 11px; font-weight: 700; margin-bottom: 8px;">
-          <span class="pulse-dot"></span>
-          <span>ACTIVE INSPECTOR • Live Node</span>
-        </div>
-
-        <h2 style="font-size: 22px; font-weight: 800; color: var(--text-dark);">${state.officer.name}</h2>
-        <div style="font-family: var(--font-mono); font-size: 13px; color: var(--primary-rust); font-weight: 700; margin-bottom: 4px;">${state.officer.email}</div>
-        <div style="font-size: 12px; color: var(--text-muted);">${state.officer.inspectorId} • ${state.officer.role}</div>
-        <div style="font-size: 12px; color: var(--text-muted);">${state.officer.ministry} • ${state.officer.zone}</div>
-
-        <!-- 3-Column Stats Grid -->
-        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--card-border);">
-          <div>
-            <div style="font-size: 24px; font-weight: 800; color: var(--text-dark);">${state.officer.stats.inspections.toLocaleString()}</div>
-            <div style="font-size: 11px; color: var(--text-muted); font-weight: 600;">INSPECTIONS</div>
-          </div>
-
-          <div>
-            <div style="font-size: 24px; font-weight: 800; color: var(--status-compliant);">${state.officer.stats.sealIntegrity}%</div>
-            <div style="font-size: 11px; color: var(--text-muted); font-weight: 600;">SEAL INTEGRITY</div>
-          </div>
-
-          <div>
-            <div style="font-size: 24px; font-weight: 800; color: var(--primary-rust);">0${state.officer.stats.syncQueue}</div>
-            <div style="font-size: 11px; color: var(--text-muted); font-weight: 600;">SYNC QUEUE</div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Account Operations List -->
-      <div class="section-card">
-        <div style="font-size: 11px; font-weight: 800; letter-spacing: 0.5px; color: var(--text-muted); text-transform: uppercase; margin-bottom: 16px; display: flex; justify-content: space-between;">
-          <span>ACCOUNT OPERATIONS</span>
-          <span style="color: var(--primary-rust);">TIER-1 ACCESS</span>
-        </div>
-
-        <div style="display: flex; flex-direction: column; gap: 12px;">
-          <button class="btn-primary" id="btn-edit-profile" style="background: var(--bg-cream); color: var(--text-dark); border: 1px solid var(--card-border); justify-content: space-between; padding: 14px 18px; box-shadow: none;">
-            <div style="display: flex; align-items: center; gap: 12px;">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: var(--primary-rust);"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-              <div style="text-align: left;">
-                <div style="font-weight: 700;">Edit Profile Details</div>
-                <div style="font-size: 11px; color: var(--text-muted);">Official contact & desk coordinates</div>
-              </div>
-            </div>
-            <span>›</span>
-          </button>
-
-          <button class="btn-primary" id="btn-change-pin" style="background: var(--bg-cream); color: var(--text-dark); border: 1px solid var(--card-border); justify-content: space-between; padding: 14px 18px; box-shadow: none;">
-            <div style="display: flex; align-items: center; gap: 12px;">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: var(--primary-rust);"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-              <div style="text-align: left;">
-                <div style="font-weight: 700;">Change Security PIN</div>
-                <div style="font-size: 11px; color: var(--text-muted);">6-digit cryptographic field token</div>
-              </div>
-            </div>
-            <span>›</span>
-          </button>
-
-          <div style="display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; background: var(--bg-cream); border-radius: var(--radius-md); border: 1px solid var(--card-border);">
-            <div style="display: flex; align-items: center; gap: 12px;">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: var(--primary-rust);"><path d="M12 11c0 3.517-1.009 6.799-2.753 9.571m-3.44-2.04c.054-.19.088-.387.088-.592 0-.206-.034-.404-.089-.594m2.096-7.85c-.322.254-.67.48-1.042.678m-.286-4.51c.712.197 1.378.498 1.978.895m-2.92-3.14c.797.106 1.558.33 2.261.663m-5.068 1.3c.725.26 1.408.618 2.03 1.06M3 7.5A10.5 10.5 0 0 1 13.5 18"/></svg>
-              <div>
-                <div style="font-weight: 700; font-size: 14px;">Biometric Authorization</div>
-                <div style="font-size: 11px; color: var(--text-muted);">Fast audit seal confirmation</div>
-              </div>
-            </div>
-
-            <input type="checkbox" id="toggle-biometric" ${state.officer.security.biometricEnabled ? 'checked' : ''} style="width: 20px; height: 20px; accent-color: var(--primary-rust);" />
-          </div>
-        </div>
-      </div>
-
-      <!-- Regulatory Node Info -->
-      <div class="section-card">
-        <div style="font-size: 11px; font-weight: 800; letter-spacing: 0.5px; color: var(--text-muted); text-transform: uppercase; margin-bottom: 14px; display: flex; justify-content: space-between;">
-          <span>REGULATORY NODE INFO</span>
-          <span style="color: var(--primary-rust);">CLUSTER #09</span>
-        </div>
-
-        <div style="display: flex; flex-direction: column; gap: 10px; font-size: 13px;">
-          <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px; background: var(--bg-cream); border-radius: 6px;">
-            <div>
-              <strong>Parakh Engine</strong><br/>
-              <span style="font-size: 11px; color: var(--text-muted);">Rulebook Matrix: Legal Metrology 2026</span>
-            </div>
-            <span style="font-family: var(--font-mono); font-size: 11px; padding: 2px 8px; border-radius: 4px; background: var(--primary-rust-light); color: var(--primary-rust); font-weight: 700;">${state.officer.security.engineVersion}</span>
-          </div>
-
-          <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px; background: var(--bg-cream); border-radius: 6px;">
-            <div>
-              <strong>Sovereign Node Hash</strong><br/>
-              <span style="font-family: var(--font-mono); font-size: 11px; color: var(--text-dark);">${state.officer.security.sovereignHash}</span>
-            </div>
-            <span style="font-family: var(--font-mono); font-size: 10px; padding: 2px 8px; border-radius: 4px; background: var(--status-compliant-bg); color: var(--status-compliant); font-weight: 700;">SHA-256 SYNCED</span>
-          </div>
-        </div>
-      </div>
-
-      <button class="btn-primary" id="btn-logout-full" style="background: var(--status-noncompliant-bg); color: var(--status-noncompliant); border: 1px solid var(--status-noncompliant-border); box-shadow: none;">
-        <span>🚪 Logout Secure Session</span>
-      </button>
-
-      <div style="text-align: center; font-size: 11px; color: var(--text-muted); font-family: var(--font-mono);">
-        🔒 TLS 256-bit Encrypted Sovereign Metrology Network<br/>
-        PARAKH VERIFIED FIELD TERMINAL • GOVT. OF INDIA
-      </div>
-    </div>
-  `;
-}
-
-// Toast Notification
-function renderToast() {
-  return `
-    <div style="position: fixed; bottom: 24px; right: 24px; background: var(--text-dark); color: #FFFFFF; padding: 14px 20px; border-radius: var(--radius-md); font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 10px; box-shadow: var(--shadow-lg); z-index: 1000;">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: #00E676;"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-      <span>${state.toastMessage}</span>
-    </div>
-  `;
-}
-
-function showToast(msg) {
-  state.toastMessage = msg;
-  render();
-  setTimeout(() => {
-    state.toastMessage = null;
-    render();
-  }, 3500);
-}
-
-// Event Bindings
-function bindGlobalEvents() {
-  // Navigation view clicks
-  document.querySelectorAll('[data-view]').forEach(el => {
-    el.addEventListener('click', (e) => {
-      e.preventDefault();
-      const targetView = el.getAttribute('data-view');
-      if (targetView) {
-        state.currentView = targetView;
-        render();
-      }
-    });
-  });
-
-  // Logout button
-  const logoutBtn = document.getElementById('btn-logout');
-  if (logoutBtn) {
-    logoutBtn.addEventListener('click', () => {
-      state.isLoggedIn = false;
-      showToast('Logged out of PARAKH Sovereign Session.');
-    });
-  }
-
-  // Header search input
-  const searchInput = document.getElementById('header-search-input');
-  if (searchInput) {
-    searchInput.addEventListener('input', (e) => {
-      state.searchQuery = e.target.value;
-    });
-  }
-}
-
-function bindAuthEvents() {
-  const form = document.getElementById('auth-form');
-  if (form) {
-    form.addEventListener('submit', () => {
-      state.isLoggedIn = true;
-      state.currentView = 'dashboard';
-      showToast('Welcome back, Inspector R. Sharma!');
-    });
-  }
-
-  const pwdToggle = document.getElementById('btn-toggle-password');
-  if (pwdToggle) {
-    pwdToggle.addEventListener('click', () => {
-      const input = document.getElementById('input-password');
-      if (input) {
-        input.type = input.type === 'password' ? 'text' : 'password';
-      }
-    });
-  }
-}
-
-function bindCurrentViewEvents() {
-  // View Dossier buttons in Dashboard
-  document.querySelectorAll('.btn-view-dossier').forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const dossierId = btn.getAttribute('data-dossier-id');
-      if (dossierId) {
-        state.selectedDossierId = dossierId;
-        const selected = state.dossiers.find(d => d.id === dossierId);
-        if (selected) {
-          state.activeInspectionImage = selected.image;
-        }
-      }
-      state.currentView = 'dossier';
-      render();
-    });
-  });
-
-  // Studio Scanner triggers
-  const btnRunAnalysis = document.getElementById('btn-run-analysis-now');
-  if (btnRunAnalysis) {
-    btnRunAnalysis.addEventListener('click', () => {
-      startTelemetryStream();
-    });
-  }
-
-  const btnTriggerScan = document.getElementById('btn-trigger-scan');
-  if (btnTriggerScan) {
-    btnTriggerScan.addEventListener('click', () => {
-      startTelemetryStream();
-    });
-  }
-
-  // Sample package selection
-  document.querySelectorAll('.btn-sample-select').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const img = btn.getAttribute('data-img');
-      const name = btn.getAttribute('data-name');
-      if (img && name) {
-        state.activeInspectionImage = img;
-        state.activeInspectionName = name;
-        showToast(`Loaded sample: ${name}`);
-        render();
-      }
-    });
-  });
-
-  // File Upload trigger
-  const btnUpload = document.getElementById('btn-upload-file');
-  const hiddenInput = document.getElementById('file-input-hidden');
-  if (btnUpload && hiddenInput) {
-    btnUpload.addEventListener('click', () => hiddenInput.click());
-    hiddenInput.addEventListener('change', (e) => {
-      if (e.target.files && e.target.files[0]) {
-        const file = e.target.files[0];
-        const reader = new FileReader();
-        reader.onload = (evt) => {
-          state.activeInspectionImage = evt.target.result;
-          state.activeInspectionName = file.name;
-          showToast(`Uploaded file: ${file.name}`);
-          render();
-        };
-        reader.readAsDataURL(file);
-      }
-    });
-  }
-
-  // Telemetry Cancel
-  const btnCancelTel = document.getElementById('btn-cancel-telemetry');
-  if (btnCancelTel) {
-    btnCancelTel.addEventListener('click', () => {
-      clearInterval(state.telemetryInterval);
-      state.currentView = 'studio';
-      showToast('Field verification aborted.');
-    });
-  }
-
-  // Extraction Check Compliance Button
-  const btnCheckComp = document.getElementById('btn-execute-compliance-check');
-  if (btnCheckComp) {
-    btnCheckComp.addEventListener('click', () => {
-      state.currentView = 'dossier';
-      showToast('Compliance audit calculated. Dossier generated!');
-    });
-  }
-
-  const btnDirectComp = document.getElementById('btn-direct-complaint');
-  if (btnDirectComp) {
-    btnDirectComp.addEventListener('click', () => {
-      state.currentView = 'queue';
-      showToast('Formal complaint initialized in intake queue.');
-    });
-  }
-
-  // Dossier Actions
-  const btnPrint = document.getElementById('btn-print-dossier');
-  if (btnPrint) {
-    btnPrint.addEventListener('click', () => {
-      window.print();
-    });
-  }
-
-  const btnDossierComplaint = document.getElementById('btn-dossier-file-complaint');
-  if (btnDossierComplaint) {
-    btnDossierComplaint.addEventListener('click', () => {
-      state.currentView = 'queue';
-      showToast('Official complaint escalated to Central Enforcement Feed.');
-    });
-  }
-
-  // Queue Filters
-  document.querySelectorAll('.filter-tab').forEach(tab => {
-    tab.addEventListener('click', () => {
-      state.activeDossierFilter = tab.getAttribute('data-filter');
-      render();
-    });
-  });
-
-  // Profile actions
-  const btnLogoutFull = document.getElementById('btn-logout-full');
-  if (btnLogoutFull) {
-    btnLogoutFull.addEventListener('click', () => {
-      state.isLoggedIn = false;
-      showToast('Secure Session Logged Out.');
-    });
-  }
-}
-
-function startTelemetryStream() {
-  state.currentView = 'telemetry';
-  state.telemetryProgress = 15;
-  render();
-
-  if (state.telemetryInterval) clearInterval(state.telemetryInterval);
-
-  state.telemetryInterval = setInterval(() => {
-    state.telemetryProgress += 20;
-    if (state.telemetryProgress >= 100) {
-      state.telemetryProgress = 100;
-      clearInterval(state.telemetryInterval);
-      setTimeout(() => {
-        state.currentView = 'extraction';
-        showToast('OCR extraction completed. Please review fields.');
-      }, 500);
-    } else {
-      const gaugePercent = document.getElementById('telemetry-percent');
-      const gaugeCircle = document.getElementById('telemetry-gauge');
-      if (gaugePercent) gaugePercent.innerText = `${state.telemetryProgress}%`;
-      if (gaugeCircle) gaugeCircle.style.background = `conic-gradient(var(--primary-rust) 0% ${state.telemetryProgress}%, var(--card-cream-bg) ${state.telemetryProgress}% 100%)`;
+  btn.disabled = true;
+  lbl.innerHTML = `<span class="spinner"></span> Signing in…`;
+
+  try {
+    const session = await api.login(email, password);
+    // login() fetches session; now verify admin role by calling admin endpoint
+    api.setToken(session.access_token);
+    try {
+      await api.verifyAdminRole(session.access_token);
+    } catch (roleErr) {
+      api.clearToken();
+      errEl.innerHTML = `<div class="auth-error">Access denied. This portal is for admins only.</div>`;
+      return;
     }
-  }, 400);
+    state.adminUser = { user_id: session.user_id, email: session.email };
+    navigate('dashboard');
+  } catch (err) {
+    api.clearToken();
+    errEl.innerHTML = `<div class="auth-error">${escHtml(err.message || 'Login failed')}</div>`;
+  } finally {
+    btn.disabled = false;
+    lbl.textContent = 'Sign In to Admin Portal';
+  }
 }
 
-// Initial App Launch
+// ═══════════════════════════════════════════════════════════════════════════
+// VIEW: Dashboard
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function renderDashboard() {
+  document.getElementById('app').innerHTML = renderShell(loadingHtml('Loading dashboard…'), 'Dashboard');
+  bindShellEvents();
+
+  let stats;
+  try {
+    stats = await api.getAdminDashboard();
+  } catch (err) {
+    document.getElementById('view-area').innerHTML = errorHtml(err.message);
+    return;
+  }
+
+  const recentRows = (stats.recent_inspections || []).map(i => `
+    <tr>
+      <td><span class="font-mono" style="font-family:var(--font-mono);font-size:12px;color:var(--primary);">${escHtml(i.inspection_id)}</span></td>
+      <td>${escHtml(i.product_name || '—')}</td>
+      <td>${escHtml(i.inspector_name || '—')}</td>
+      <td>${statusBadge(i.compliance_status)}</td>
+      <td>${fmtDate(i.inspection_date)}</td>
+      <td>
+        <button class="btn btn-ghost btn-sm view-inspection-btn" data-id="${escHtml(i.inspection_id)}">${I.eye} View</button>
+      </td>
+    </tr>`).join('');
+
+  document.getElementById('view-area').innerHTML = `
+    <div class="page-header">
+      <div>
+        <div class="page-title">Admin Dashboard</div>
+        <div class="page-subtitle">System-wide overview — real data</div>
+      </div>
+    </div>
+
+    <div class="stats-grid">
+      <div class="stat-card blue">
+        <div class="stat-label">Total Inspectors</div>
+        <div class="stat-value">${stats.total_inspectors}</div>
+        <div class="stat-sub">${stats.active_inspectors} active, ${stats.inactive_inspectors} inactive</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Total Inspections</div>
+        <div class="stat-value">${stats.total_inspections}</div>
+        <div class="stat-sub">${stats.pending_inspections} pending</div>
+      </div>
+      <div class="stat-card green">
+        <div class="stat-label">Compliant</div>
+        <div class="stat-value">${stats.compliant_inspections}</div>
+        <div class="stat-sub">Passed all checks</div>
+      </div>
+      <div class="stat-card red">
+        <div class="stat-label">Non-Compliant</div>
+        <div class="stat-value">${stats.non_compliant_inspections}</div>
+        <div class="stat-sub">Failed checks</div>
+      </div>
+      <div class="stat-card amber">
+        <div class="stat-label">Pending Review</div>
+        <div class="stat-value">${stats.pending_inspections}</div>
+        <div class="stat-sub">Awaiting ML / capture</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Total Complaints</div>
+        <div class="stat-value">${stats.total_complaints}</div>
+        <div class="stat-sub">All complaints</div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:4px;">
+      <div class="card-header">
+        <span class="card-title">Recent Inspections</span>
+        <button class="btn btn-ghost btn-sm" data-nav="inspections">View All</button>
+      </div>
+      <div class="table-wrap" style="border:none;box-shadow:none;border-radius:0;">
+        <table>
+          <thead><tr>
+            <th>Inspection ID</th><th>Product</th><th>Inspector</th>
+            <th>Status</th><th>Date</th><th>Action</th>
+          </tr></thead>
+          <tbody>${recentRows || `<tr><td colspan="6">${emptyHtml('No inspections yet')}</td></tr>`}</tbody>
+        </table>
+      </div>
+    </div>`;
+
+  bindShellEvents();
+  document.querySelectorAll('.view-inspection-btn').forEach(btn => {
+    btn.addEventListener('click', () => navigate('inspection-detail', { id: btn.dataset.id }));
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// VIEW: Inspectors list
+// ═══════════════════════════════════════════════════════════════════════════
+
+const inspectorFilters = { search: '', department: '', active: '', page: 1, page_size: 20 };
+
+async function renderInspectors() {
+  document.getElementById('app').innerHTML = renderShell(loadingHtml('Loading inspectors…'), 'Inspector Management');
+  bindShellEvents();
+  await loadInspectors();
+}
+
+async function loadInspectors() {
+  const viewArea = document.getElementById('view-area');
+  if (!viewArea) return;
+
+  const params = {};
+  if (inspectorFilters.search) params.search = inspectorFilters.search;
+  if (inspectorFilters.department) params.department = inspectorFilters.department;
+  if (inspectorFilters.active !== '') params.active = inspectorFilters.active;
+  params.page = inspectorFilters.page;
+  params.page_size = inspectorFilters.page_size;
+
+  let result;
+  try {
+    result = await api.listInspectors(params);
+  } catch (err) {
+    viewArea.innerHTML = errorHtml(err.message);
+    return;
+  }
+
+  const { items = [], total = 0, page = 1, page_size = 20 } = result;
+  const totalPages = Math.max(1, Math.ceil(total / page_size));
+
+  const rows = items.map(p => `
+    <tr>
+      <td>
+        <div class="inspector-cell">
+          <div class="avatar-sm">${initials(p.full_name)}</div>
+          <div>
+            <div class="inspector-cell-name">${escHtml(p.full_name || '—')}</div>
+            <div class="inspector-cell-email">${escHtml(p.email || '—')}</div>
+          </div>
+        </div>
+      </td>
+      <td><span style="font-family:var(--font-mono);font-size:12px;">${escHtml(p.employee_id || '—')}</span></td>
+      <td>${escHtml(p.department || '—')}</td>
+      <td>${escHtml(p.role || '—')}</td>
+      <td>${activeBadge(p.active)}</td>
+      <td>${fmtDate(p.created_at)}</td>
+      <td>
+        <div style="display:flex;gap:6px;">
+          <button class="btn btn-ghost btn-sm insp-view-btn" data-id="${escHtml(p.id)}">${I.eye} View</button>
+          <button class="btn btn-ghost btn-sm insp-toggle-btn" data-id="${escHtml(p.id)}" data-active="${p.active}">${p.active ? 'Deactivate' : 'Activate'}</button>
+        </div>
+      </td>
+    </tr>`).join('');
+
+  viewArea.innerHTML = `
+    <div class="page-header">
+      <div>
+        <div class="page-title">Inspectors</div>
+        <div class="page-subtitle">${total} inspector${total !== 1 ? 's' : ''} total</div>
+      </div>
+      <button class="btn btn-primary" id="create-inspector-btn">${I.plus} Create Inspector</button>
+    </div>
+
+    <div class="filters-bar">
+      <input class="filter-input" id="insp-search" placeholder="Search name, email, ID…" value="${escHtml(inspectorFilters.search)}" />
+      <select class="filter-select" id="insp-active">
+        <option value="">All Status</option>
+        <option value="true" ${inspectorFilters.active === 'true' ? 'selected' : ''}>Active</option>
+        <option value="false" ${inspectorFilters.active === 'false' ? 'selected' : ''}>Inactive</option>
+      </select>
+      <button class="btn btn-ghost btn-sm" id="insp-filter-btn">${I.search} Search</button>
+      <button class="btn btn-ghost btn-sm" id="insp-reset-btn">Reset</button>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>Inspector</th><th>Employee ID</th><th>Department</th>
+          <th>Role</th><th>Status</th><th>Created</th><th>Actions</th>
+        </tr></thead>
+        <tbody>${rows || `<tr><td colspan="7">${emptyHtml('No inspectors found')}</td></tr>`}</tbody>
+      </table>
+      <div class="pagination">
+        <span class="page-info">Showing ${items.length} of ${total}</span>
+        <div class="page-btns">
+          <button class="page-btn" id="insp-prev" ${page <= 1 ? 'disabled' : ''}>‹</button>
+          <button class="page-btn active">${page}</button>
+          <button class="page-btn" id="insp-next" ${page >= totalPages ? 'disabled' : ''}>›</button>
+        </div>
+      </div>
+    </div>`;
+
+  // Events
+  document.getElementById('create-inspector-btn').addEventListener('click', () => navigate('create-inspector'));
+  document.getElementById('insp-filter-btn').addEventListener('click', () => {
+    inspectorFilters.search = document.getElementById('insp-search').value.trim();
+    inspectorFilters.active = document.getElementById('insp-active').value;
+    inspectorFilters.page = 1;
+    loadInspectors();
+  });
+  document.getElementById('insp-reset-btn').addEventListener('click', () => {
+    inspectorFilters.search = ''; inspectorFilters.active = ''; inspectorFilters.page = 1;
+    loadInspectors();
+  });
+  document.getElementById('insp-search').addEventListener('keydown', e => {
+    if (e.key === 'Enter') document.getElementById('insp-filter-btn').click();
+  });
+  const prevBtn = document.getElementById('insp-prev');
+  const nextBtn = document.getElementById('insp-next');
+  if (prevBtn) prevBtn.addEventListener('click', () => { inspectorFilters.page--; loadInspectors(); });
+  if (nextBtn) nextBtn.addEventListener('click', () => { inspectorFilters.page++; loadInspectors(); });
+
+  document.querySelectorAll('.insp-view-btn').forEach(btn => {
+    btn.addEventListener('click', () => navigate('inspector-detail', { id: btn.dataset.id }));
+  });
+  document.querySelectorAll('.insp-toggle-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const newActive = btn.dataset.active === 'true' ? false : true;
+      try {
+        await api.updateInspector(btn.dataset.id, { active: newActive });
+        toast(newActive ? 'Inspector activated' : 'Inspector deactivated', 'success');
+        loadInspectors();
+      } catch (err) { toast(err.message, 'error'); }
+    });
+  });
+  bindShellEvents();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// VIEW: Inspector detail
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function renderInspectorDetail() {
+  document.getElementById('app').innerHTML = renderShell(loadingHtml('Loading inspector…'), 'Inspector Detail');
+  bindShellEvents();
+
+  let profile;
+  try {
+    profile = await api.getInspector(state.params.id);
+  } catch (err) {
+    document.getElementById('view-area').innerHTML = errorHtml(err.message);
+    return;
+  }
+
+  document.getElementById('view-area').innerHTML = `
+    <div class="back-link" id="back-to-inspectors">${I.back} Back to Inspectors</div>
+
+    <div class="page-header">
+      <div style="display:flex;align-items:center;gap:14px;">
+        <div style="width:52px;height:52px;border-radius:50%;background:var(--primary-light);color:var(--primary-dark);font-weight:800;font-size:18px;display:flex;align-items:center;justify-content:center;">
+          ${initials(profile.full_name)}
+        </div>
+        <div>
+          <div class="page-title">${escHtml(profile.full_name || '—')}</div>
+          <div class="page-subtitle">${escHtml(profile.email || '—')}</div>
+        </div>
+      </div>
+      <div style="display:flex;gap:10px;">
+        ${activeBadge(profile.active)}
+        <button class="btn btn-ghost btn-sm" id="edit-inspector-btn">${I.edit} Edit</button>
+        <button class="btn btn-ghost btn-sm toggle-active-btn" data-active="${profile.active}">${profile.active ? 'Deactivate' : 'Activate'}</button>
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;">
+      <div class="card">
+        <div class="card-header"><span class="card-title">Profile Details</span></div>
+        <div class="card-body">
+          <div class="detail-grid">
+            <div class="detail-item"><div class="detail-key">Employee ID</div><div class="detail-val">${escHtml(profile.employee_id || '—')}</div></div>
+            <div class="detail-item"><div class="detail-key">Department</div><div class="detail-val">${escHtml(profile.department || '—')}</div></div>
+            <div class="detail-item"><div class="detail-key">Phone</div><div class="detail-val">${escHtml(profile.phone || '—')}</div></div>
+            <div class="detail-item"><div class="detail-key">Role</div><div class="detail-val">${escHtml(profile.role || '—')}</div></div>
+            <div class="detail-item"><div class="detail-key">Created</div><div class="detail-val">${fmtDateTime(profile.created_at)}</div></div>
+            <div class="detail-item"><div class="detail-key">Updated</div><div class="detail-val">${fmtDateTime(profile.updated_at)}</div></div>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header"><span class="card-title">Account Info</span></div>
+        <div class="card-body">
+          <div class="detail-grid">
+            <div class="detail-item"><div class="detail-key">User ID</div><div class="detail-val" style="font-family:var(--font-mono);font-size:11px;">${escHtml(profile.user_id)}</div></div>
+            <div class="detail-item"><div class="detail-key">Status</div><div class="detail-val">${activeBadge(profile.active)}</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="edit-form-area"></div>`;
+
+  document.getElementById('back-to-inspectors').addEventListener('click', () => navigate('inspectors'));
+  document.querySelector('.toggle-active-btn').addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    const newActive = btn.dataset.active === 'true' ? false : true;
+    try {
+      await api.updateInspector(profile.id, { active: newActive });
+      toast(newActive ? 'Inspector activated' : 'Inspector deactivated', 'success');
+      navigate('inspector-detail', { id: profile.id });
+    } catch (err) { toast(err.message, 'error'); }
+  });
+  document.getElementById('edit-inspector-btn').addEventListener('click', () => {
+    renderEditInspectorForm(profile);
+  });
+  bindShellEvents();
+}
+
+function renderEditInspectorForm(profile) {
+  document.getElementById('edit-form-area').innerHTML = `
+    <div class="card" style="margin-top:20px;">
+      <div class="card-header"><span class="card-title">Edit Inspector</span></div>
+      <div class="card-body">
+        <div id="edit-form-error"></div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Full Name</label>
+            <input class="form-input" id="ef-name" value="${escHtml(profile.full_name || '')}" />
+          </div>
+          <div class="form-group">
+            <label class="form-label">Employee ID</label>
+            <input class="form-input" id="ef-empid" value="${escHtml(profile.employee_id || '')}" />
+          </div>
+          <div class="form-group">
+            <label class="form-label">Department</label>
+            <input class="form-input" id="ef-dept" value="${escHtml(profile.department || '')}" />
+          </div>
+          <div class="form-group">
+            <label class="form-label">Phone</label>
+            <input class="form-input" id="ef-phone" value="${escHtml(profile.phone || '')}" />
+          </div>
+        </div>
+        <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px;">
+          <button class="btn btn-ghost" id="ef-cancel">Cancel</button>
+          <button class="btn btn-primary" id="ef-save">Save Changes</button>
+        </div>
+      </div>
+    </div>`;
+
+  document.getElementById('ef-cancel').addEventListener('click', () => {
+    document.getElementById('edit-form-area').innerHTML = '';
+  });
+  document.getElementById('ef-save').addEventListener('click', async () => {
+    const payload = {};
+    const name = document.getElementById('ef-name').value.trim();
+    if (name) payload.full_name = name;
+    const empid = document.getElementById('ef-empid').value.trim();
+    if (empid) payload.employee_id = empid;
+    const dept = document.getElementById('ef-dept').value.trim();
+    if (dept) payload.department = dept;
+    const phone = document.getElementById('ef-phone').value.trim();
+    if (phone) payload.phone = phone;
+
+    try {
+      await api.updateInspector(profile.id, payload);
+      toast('Inspector updated', 'success');
+      navigate('inspector-detail', { id: profile.id });
+    } catch (err) {
+      document.getElementById('edit-form-error').innerHTML = `<div class="alert alert-error">${escHtml(err.message)}</div>`;
+    }
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// VIEW: Create Inspector
+// ═══════════════════════════════════════════════════════════════════════════
+
+function renderCreateInspector() {
+  document.getElementById('app').innerHTML = renderShell(`
+    <div class="back-link" id="back-to-inspectors">${I.back} Back to Inspectors</div>
+
+    <div class="page-header">
+      <div>
+        <div class="page-title">Create Inspector Account</div>
+        <div class="page-subtitle">Creates both Supabase Auth user and inspector profile</div>
+      </div>
+    </div>
+
+    <div class="card" style="max-width:640px;">
+      <div class="card-header"><span class="card-title">Inspector Details</span></div>
+      <div class="card-body">
+        <div id="create-form-alert"></div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Full Name *</label>
+            <input class="form-input" id="ci-name" placeholder="e.g. Rajesh Kumar" />
+          </div>
+          <div class="form-group">
+            <label class="form-label">Email Address *</label>
+            <input class="form-input" type="email" id="ci-email" placeholder="inspector@department.gov.in" />
+          </div>
+          <div class="form-group">
+            <label class="form-label">Initial Password *</label>
+            <input class="form-input" type="password" id="ci-password" placeholder="Min 8 characters" autocomplete="new-password" />
+            <div class="form-hint">Inspector uses this to log in on Android. Supabase Auth manages it — not stored here.</div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Employee ID</label>
+            <input class="form-input" id="ci-empid" placeholder="e.g. EMP-2024-001" />
+          </div>
+          <div class="form-group">
+            <label class="form-label">Department</label>
+            <input class="form-input" id="ci-dept" placeholder="e.g. Food Safety" />
+          </div>
+          <div class="form-group">
+            <label class="form-label">Phone</label>
+            <input class="form-input" id="ci-phone" placeholder="e.g. +91 98765 43210" />
+          </div>
+          <div class="form-group">
+            <label class="form-label">Role</label>
+            <select class="form-input" id="ci-role">
+              <option value="inspector">Inspector</option>
+              <option value="senior_inspector">Senior Inspector</option>
+              <option value="admin">Admin</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Status</label>
+            <select class="form-input" id="ci-active">
+              <option value="true">Active</option>
+              <option value="false">Inactive</option>
+            </select>
+          </div>
+        </div>
+        <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px;">
+          <button class="btn btn-ghost" id="ci-cancel">Cancel</button>
+          <button class="btn btn-primary" id="ci-submit">${I.plus} Create Inspector</button>
+        </div>
+      </div>
+    </div>`, 'Create Inspector');
+
+  bindShellEvents();
+  document.getElementById('back-to-inspectors').addEventListener('click', () => navigate('inspectors'));
+  document.getElementById('ci-cancel').addEventListener('click', () => navigate('inspectors'));
+  document.getElementById('ci-submit').addEventListener('click', doCreateInspector);
+}
+
+async function doCreateInspector() {
+  const alertEl = document.getElementById('create-form-alert');
+  const btn = document.getElementById('ci-submit');
+
+  const name = document.getElementById('ci-name').value.trim();
+  const email = document.getElementById('ci-email').value.trim();
+  const password = document.getElementById('ci-password').value;
+  const empid = document.getElementById('ci-empid').value.trim();
+  const dept = document.getElementById('ci-dept').value.trim();
+  const phone = document.getElementById('ci-phone').value.trim();
+  const role = document.getElementById('ci-role').value;
+  const active = document.getElementById('ci-active').value === 'true';
+
+  alertEl.innerHTML = '';
+
+  if (!name) { alertEl.innerHTML = `<div class="alert alert-error">Full name is required.</div>`; return; }
+  if (!email) { alertEl.innerHTML = `<div class="alert alert-error">Email is required.</div>`; return; }
+  if (!password || password.length < 8) { alertEl.innerHTML = `<div class="alert alert-error">Password must be at least 8 characters.</div>`; return; }
+
+  btn.disabled = true;
+  btn.innerHTML = `<span class="spinner"></span> Creating…`;
+
+  const payload = { full_name: name, email, password, role, active };
+  if (empid) payload.employee_id = empid;
+  if (dept) payload.department = dept;
+  if (phone) payload.phone = phone;
+
+  try {
+    const created = await api.createInspector(payload);
+    toast(`Inspector "${created.full_name}" created successfully`, 'success');
+    navigate('inspectors');
+  } catch (err) {
+    let msg = err.message;
+    if (err.errorCode === 'DUPLICATE_EMAIL') msg = `An account with that email already exists.`;
+    if (err.errorCode === 'DUPLICATE_EMPLOYEE_ID') msg = `An account with that employee ID already exists.`;
+    alertEl.innerHTML = `<div class="alert alert-error">${escHtml(msg)}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = `${I.plus} Create Inspector`;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// VIEW: Inspections list
+// ═══════════════════════════════════════════════════════════════════════════
+
+const inspectionFilters = { search: '', status: '', product_type: '', date_from: '', date_to: '', page: 1, page_size: 20 };
+
+async function renderInspections() {
+  document.getElementById('app').innerHTML = renderShell(loadingHtml('Loading inspections…'), 'Inspections');
+  bindShellEvents();
+  await loadInspections();
+}
+
+async function loadInspections() {
+  const viewArea = document.getElementById('view-area');
+  if (!viewArea) return;
+
+  const params = {};
+  if (inspectionFilters.search) params.search = inspectionFilters.search;
+  if (inspectionFilters.status) params.status = inspectionFilters.status;
+  if (inspectionFilters.product_type) params.product_type = inspectionFilters.product_type;
+  if (inspectionFilters.date_from) params.date_from = inspectionFilters.date_from;
+  if (inspectionFilters.date_to) params.date_to = inspectionFilters.date_to;
+  params.page = inspectionFilters.page;
+  params.page_size = inspectionFilters.page_size;
+
+  let result;
+  try {
+    result = await api.listAdminInspections(params);
+  } catch (err) {
+    viewArea.innerHTML = errorHtml(err.message);
+    return;
+  }
+
+  const { items = [], total = 0, page = 1, page_size = 20 } = result;
+  const totalPages = Math.max(1, Math.ceil(total / page_size));
+
+  const rows = items.map(i => `
+    <tr>
+      <td><span style="font-family:var(--font-mono);font-size:12px;color:var(--primary);">${escHtml(i.inspection_id)}</span></td>
+      <td>
+        <div style="font-weight:600;font-size:13px;">${escHtml(i.inspector_name || '—')}</div>
+        <div style="font-size:11px;color:var(--text-muted);">${escHtml(i.inspector_email || '')}</div>
+      </td>
+      <td>${escHtml(i.product_name || '—')}</td>
+      <td>${escHtml(i.product_type || '—')}</td>
+      <td>${i.side_count ? `${i.side_count}-side` : '—'}</td>
+      <td>${statusBadge(i.compliance_status)}</td>
+      <td>${fmtDate(i.inspection_date || i.created_at)}</td>
+      <td>
+        <button class="btn btn-ghost btn-sm view-insp-btn" data-id="${escHtml(i.inspection_id)}">${I.eye} View</button>
+      </td>
+    </tr>`).join('');
+
+  viewArea.innerHTML = `
+    <div class="page-header">
+      <div>
+        <div class="page-title">All Inspections</div>
+        <div class="page-subtitle">${total} inspection${total !== 1 ? 's' : ''} total</div>
+      </div>
+    </div>
+
+    <div class="filters-bar">
+      <input class="filter-input" id="insp2-search" placeholder="Search product, ID…" value="${escHtml(inspectionFilters.search)}" />
+      <select class="filter-select" id="insp2-status">
+        <option value="">All Status</option>
+        <option value="COMPLIANT" ${inspectionFilters.status === 'COMPLIANT' ? 'selected' : ''}>Compliant</option>
+        <option value="NON_COMPLIANT" ${inspectionFilters.status === 'NON_COMPLIANT' ? 'selected' : ''}>Non-Compliant</option>
+        <option value="PENDING_ML" ${inspectionFilters.status === 'PENDING_ML' ? 'selected' : ''}>Pending ML</option>
+        <option value="PROCESSING" ${inspectionFilters.status === 'PROCESSING' ? 'selected' : ''}>Processing</option>
+        <option value="CREATED" ${inspectionFilters.status === 'CREATED' ? 'selected' : ''}>Created</option>
+        <option value="FAILED" ${inspectionFilters.status === 'FAILED' ? 'selected' : ''}>Failed</option>
+      </select>
+      <input class="filter-input" type="date" id="insp2-from" value="${inspectionFilters.date_from}" style="max-width:150px;" />
+      <input class="filter-input" type="date" id="insp2-to" value="${inspectionFilters.date_to}" style="max-width:150px;" />
+      <button class="btn btn-ghost btn-sm" id="insp2-filter-btn">${I.search} Filter</button>
+      <button class="btn btn-ghost btn-sm" id="insp2-reset-btn">Reset</button>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>Inspection ID</th><th>Inspector</th><th>Product</th>
+          <th>Type</th><th>Sides</th><th>Status</th><th>Date</th><th>Action</th>
+        </tr></thead>
+        <tbody>${rows || `<tr><td colspan="8">${emptyHtml('No inspections found')}</td></tr>`}</tbody>
+      </table>
+      <div class="pagination">
+        <span class="page-info">Showing ${items.length} of ${total}</span>
+        <div class="page-btns">
+          <button class="page-btn" id="insp2-prev" ${page <= 1 ? 'disabled' : ''}>‹</button>
+          <button class="page-btn active">${page}</button>
+          <button class="page-btn" id="insp2-next" ${page >= totalPages ? 'disabled' : ''}>›</button>
+        </div>
+      </div>
+    </div>`;
+
+  document.getElementById('insp2-filter-btn').addEventListener('click', () => {
+    inspectionFilters.search = document.getElementById('insp2-search').value.trim();
+    inspectionFilters.status = document.getElementById('insp2-status').value;
+    inspectionFilters.date_from = document.getElementById('insp2-from').value;
+    inspectionFilters.date_to = document.getElementById('insp2-to').value;
+    inspectionFilters.page = 1;
+    loadInspections();
+  });
+  document.getElementById('insp2-reset-btn').addEventListener('click', () => {
+    Object.assign(inspectionFilters, { search: '', status: '', product_type: '', date_from: '', date_to: '', page: 1 });
+    loadInspections();
+  });
+  document.getElementById('insp2-search').addEventListener('keydown', e => { if (e.key === 'Enter') document.getElementById('insp2-filter-btn').click(); });
+  const prevBtn = document.getElementById('insp2-prev');
+  const nextBtn = document.getElementById('insp2-next');
+  if (prevBtn) prevBtn.addEventListener('click', () => { inspectionFilters.page--; loadInspections(); });
+  if (nextBtn) nextBtn.addEventListener('click', () => { inspectionFilters.page++; loadInspections(); });
+
+  document.querySelectorAll('.view-insp-btn').forEach(btn => {
+    btn.addEventListener('click', () => navigate('inspection-detail', { id: btn.dataset.id }));
+  });
+  bindShellEvents();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// VIEW: Inspection detail
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function renderInspectionDetail() {
+  document.getElementById('app').innerHTML = renderShell(loadingHtml('Loading inspection…'), 'Inspection Detail');
+  bindShellEvents();
+
+  let data;
+  try {
+    data = await api.getAdminInspection(state.params.id);
+  } catch (err) {
+    document.getElementById('view-area').innerHTML = errorHtml(err.message);
+    return;
+  }
+
+  const { inspection, inspector, images = [], extracted_info, compliance } = data;
+
+  // Images section
+  const sideOrder = ['front', 'back', 'left', 'right'];
+  const imageCards = images.length
+    ? images.sort((a, b) => sideOrder.indexOf(a.side) - sideOrder.indexOf(b.side)).map(img => `
+        <div class="image-card">
+          <img src="${escHtml(img.public_url)}" alt="${escHtml(img.side)}" loading="lazy"
+               onerror="this.style.display='none';this.parentElement.querySelector('.img-err').style.display='block'" />
+          <div class="img-err" style="display:none;padding:20px;text-align:center;color:var(--text-muted);font-size:12px;">Image unavailable</div>
+          <div class="image-label">${escHtml(img.side.toUpperCase())}</div>
+        </div>`).join('')
+    : `<div class="state-box" style="padding:24px;"><div class="state-msg">No images uploaded yet</div></div>`;
+
+  // Extracted info
+  const extFields = extracted_info ? [
+    ['Product Name', extracted_info.common_product_name],
+    ['Manufacturer', extracted_info.manufacturer_name],
+    ['Manufacturer Address', extracted_info.manufacturer_address],
+    ['Packer', extracted_info.packer_name],
+    ['Packer Address', extracted_info.packer_address],
+    ['Importer', extracted_info.importer_name],
+    ['MRP', extracted_info.mrp ? `₹${extracted_info.mrp}` : null],
+    ['Net Quantity', extracted_info.net_quantity_value ? `${extracted_info.net_quantity_value} ${extracted_info.net_quantity_unit || ''}`.trim() : null],
+    ['Manufacture Date', extracted_info.manufacture_or_import_date],
+    ['Consumer Care', extracted_info.consumer_care_name],
+    ['Consumer Care Phone', extracted_info.consumer_care_phone],
+    ['Consumer Care Email', extracted_info.consumer_care_email],
+    ['Commodity Dimensions', extracted_info.commodity_dimensions],
+  ].filter(([, v]) => v != null) : [];
+
+  const extHtml = extFields.length
+    ? `<table class="extracted-table" style="width:100%;border-collapse:collapse;">
+        ${extFields.map(([k, v]) => `<tr><td style="padding:8px 12px;border-bottom:1px solid var(--border);">${escHtml(k)}</td><td style="padding:8px 12px;border-bottom:1px solid var(--border);">${escHtml(String(v))}</td></tr>`).join('')}
+       </table>`
+    : `<div class="state-msg" style="padding:20px;text-align:center;">${compliance?.status === 'PENDING_ML' || compliance?.status === 'PROCESSING' ? 'ML processing pending — extracted information not yet available.' : 'No extracted information available.'}</div>`;
+
+  // Compliance rules
+  const rules = compliance?.rules || [];
+  const rulesHtml = rules.length
+    ? rules.map(r => {
+        const cls = r.status === 'PASS' ? 'badge-green' : r.status === 'FAIL' ? 'badge-red' : 'badge-amber';
+        return `<div class="compliance-rule">
+          <div class="rule-name">${escHtml(r.rule_name)}</div>
+          <span class="badge ${cls}">${escHtml(r.status)}</span>
+          ${r.reason ? `<div class="rule-reason">${escHtml(r.reason)}</div>` : ''}
+          ${r.detected_value ? `<div class="rule-reason" style="grid-column:1;">Detected: ${escHtml(r.detected_value)}</div>` : ''}
+        </div>`;
+      }).join('')
+    : `<div class="state-msg" style="padding:16px;text-align:center;">No compliance rules available yet.</div>`;
+
+  document.getElementById('view-area').innerHTML = `
+    <div class="back-link" id="back-to-inspections">${I.back} Back to Inspections</div>
+
+    <div class="page-header">
+      <div>
+        <div class="page-title" style="font-family:var(--font-mono);">${escHtml(inspection.inspection_id)}</div>
+        <div class="page-subtitle">${escHtml(inspection.product_name || 'Unnamed product')} — ${statusBadge(inspection.compliance_status)}</div>
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:20px;">
+      <div class="card">
+        <div class="card-header"><span class="card-title">Inspection Info</span></div>
+        <div class="card-body">
+          <div class="detail-grid">
+            <div class="detail-item"><div class="detail-key">Product</div><div class="detail-val">${escHtml(inspection.product_name || '—')}</div></div>
+            <div class="detail-item"><div class="detail-key">Category</div><div class="detail-val">${escHtml(inspection.product_category || '—')}</div></div>
+            <div class="detail-item"><div class="detail-key">Type</div><div class="detail-val">${escHtml(inspection.product_type || '—')}</div></div>
+            <div class="detail-item"><div class="detail-key">Sides</div><div class="detail-val">${inspection.side_count ? `${inspection.side_count}-side` : '—'}</div></div>
+            <div class="detail-item"><div class="detail-key">Status</div><div class="detail-val">${statusBadge(inspection.compliance_status)}</div></div>
+            <div class="detail-item"><div class="detail-key">Score</div><div class="detail-val">${inspection.compliance_score != null ? `${Math.round(inspection.compliance_score * 100)}%` : '—'}</div></div>
+            <div class="detail-item"><div class="detail-key">Date</div><div class="detail-val">${fmtDate(inspection.inspection_date)}</div></div>
+            <div class="detail-item"><div class="detail-key">Created</div><div class="detail-val">${fmtDateTime(inspection.created_at)}</div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header"><span class="card-title">Inspector</span></div>
+        <div class="card-body">
+          <div class="detail-grid">
+            <div class="detail-item"><div class="detail-key">Name</div><div class="detail-val">${escHtml(inspector?.full_name || '—')}</div></div>
+            <div class="detail-item"><div class="detail-key">Email</div><div class="detail-val">${escHtml(inspector?.email || '—')}</div></div>
+            <div class="detail-item"><div class="detail-key">Employee ID</div><div class="detail-val">${escHtml(inspector?.employee_id || '—')}</div></div>
+            <div class="detail-item"><div class="detail-key">Department</div><div class="detail-val">${escHtml(inspector?.department || '—')}</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:20px;">
+      <div class="card-header"><span class="card-title">Package Images (${images.length} captured)</span></div>
+      <div class="card-body">
+        <div class="images-grid">${imageCards}</div>
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;">
+      <div class="card">
+        <div class="card-header"><span class="card-title">Extracted Information</span></div>
+        <div class="card-body" style="padding:0;">${extHtml}</div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Compliance</span>
+          ${compliance ? `<div style="display:flex;align-items:center;gap:8px;">${statusBadge(compliance.status)}${compliance.score != null ? `<span style="font-size:12px;color:var(--text-muted);">${Math.round(compliance.score * 100)}%</span>` : ''}</div>` : ''}
+        </div>
+        <div class="card-body">${rulesHtml}</div>
+      </div>
+    </div>`;
+
+  document.getElementById('back-to-inspections').addEventListener('click', () => navigate('inspections'));
+  bindShellEvents();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// VIEW: Complaints
+// ═══════════════════════════════════════════════════════════════════════════
+
+const complaintFilters = { status: '', category: '', page: 1, page_size: 20 };
+
+async function renderComplaints() {
+  document.getElementById('app').innerHTML = renderShell(loadingHtml('Loading complaints…'), 'Complaints');
+  bindShellEvents();
+  await loadComplaints();
+}
+
+async function loadComplaints() {
+  const viewArea = document.getElementById('view-area');
+  if (!viewArea) return;
+
+  const params = {};
+  if (complaintFilters.status) params.status = complaintFilters.status;
+  if (complaintFilters.category) params.category = complaintFilters.category;
+  params.page = complaintFilters.page;
+  params.page_size = complaintFilters.page_size;
+
+  let result;
+  try {
+    result = await api.listAdminComplaints(params);
+  } catch (err) {
+    viewArea.innerHTML = errorHtml(err.message);
+    return;
+  }
+
+  const { items = [], total = 0, page = 1, page_size = 20 } = result;
+  const totalPages = Math.max(1, Math.ceil(total / page_size));
+
+  const priorityBadge = p => {
+    if (!p) return `<span class="badge badge-grey">—</span>`;
+    if (p === 'HIGH') return `<span class="badge badge-red">High</span>`;
+    if (p === 'MEDIUM') return `<span class="badge badge-amber">Medium</span>`;
+    return `<span class="badge badge-grey">Low</span>`;
+  };
+  const cStatusBadge = s => {
+    if (!s) return `<span class="badge badge-grey">—</span>`;
+    if (s === 'OPEN') return `<span class="badge badge-red">Open</span>`;
+    if (s === 'UNDER_REVIEW') return `<span class="badge badge-amber">Under Review</span>`;
+    if (s === 'RESOLVED') return `<span class="badge badge-green">Resolved</span>`;
+    if (s === 'REJECTED') return `<span class="badge badge-grey">Rejected</span>`;
+    return `<span class="badge badge-grey">${escHtml(s)}</span>`;
+  };
+
+  const rows = items.map(c => `
+    <tr>
+      <td><span style="font-family:var(--font-mono);font-size:12px;color:var(--primary);">${escHtml(c.complaint_id)}</span></td>
+      <td>${escHtml(c.inspection_id || '—')}</td>
+      <td>${escHtml(c.product_name || '—')}</td>
+      <td>${escHtml(c.complaint_title || '—')}</td>
+      <td>${escHtml(c.category || '—')}</td>
+      <td>${priorityBadge(c.priority)}</td>
+      <td>${cStatusBadge(c.status)}</td>
+      <td>${fmtDate(c.created_at)}</td>
+    </tr>`).join('');
+
+  viewArea.innerHTML = `
+    <div class="page-header">
+      <div>
+        <div class="page-title">All Complaints</div>
+        <div class="page-subtitle">${total} complaint${total !== 1 ? 's' : ''} total</div>
+      </div>
+    </div>
+
+    <div class="filters-bar">
+      <select class="filter-select" id="comp-status">
+        <option value="">All Status</option>
+        <option value="OPEN" ${complaintFilters.status === 'OPEN' ? 'selected' : ''}>Open</option>
+        <option value="UNDER_REVIEW" ${complaintFilters.status === 'UNDER_REVIEW' ? 'selected' : ''}>Under Review</option>
+        <option value="RESOLVED" ${complaintFilters.status === 'RESOLVED' ? 'selected' : ''}>Resolved</option>
+        <option value="REJECTED" ${complaintFilters.status === 'REJECTED' ? 'selected' : ''}>Rejected</option>
+      </select>
+      <button class="btn btn-ghost btn-sm" id="comp-filter-btn">${I.search} Filter</button>
+      <button class="btn btn-ghost btn-sm" id="comp-reset-btn">Reset</button>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>Complaint ID</th><th>Inspection</th><th>Product</th>
+          <th>Title</th><th>Category</th><th>Priority</th><th>Status</th><th>Date</th>
+        </tr></thead>
+        <tbody>${rows || `<tr><td colspan="8">${emptyHtml('No complaints found')}</td></tr>`}</tbody>
+      </table>
+      <div class="pagination">
+        <span class="page-info">Showing ${items.length} of ${total}</span>
+        <div class="page-btns">
+          <button class="page-btn" id="comp-prev" ${page <= 1 ? 'disabled' : ''}>‹</button>
+          <button class="page-btn active">${page}</button>
+          <button class="page-btn" id="comp-next" ${page >= totalPages ? 'disabled' : ''}>›</button>
+        </div>
+      </div>
+    </div>`;
+
+  document.getElementById('comp-filter-btn').addEventListener('click', () => {
+    complaintFilters.status = document.getElementById('comp-status').value;
+    complaintFilters.page = 1;
+    loadComplaints();
+  });
+  document.getElementById('comp-reset-btn').addEventListener('click', () => {
+    complaintFilters.status = ''; complaintFilters.page = 1;
+    loadComplaints();
+  });
+  const prevBtn = document.getElementById('comp-prev');
+  const nextBtn = document.getElementById('comp-next');
+  if (prevBtn) prevBtn.addEventListener('click', () => { complaintFilters.page--; loadComplaints(); });
+  if (nextBtn) nextBtn.addEventListener('click', () => { complaintFilters.page++; loadComplaints(); });
+  bindShellEvents();
+}
+
+// ── Shell event bindings ──────────────────────────────────────────────────────
+
+function bindShellEvents() {
+  document.querySelectorAll('[data-nav]').forEach(el => {
+    el.addEventListener('click', () => navigate(el.dataset.nav));
+  });
+  const logoutBtns = [document.getElementById('topbar-logout'), document.getElementById('sidebar-logout')];
+  logoutBtns.forEach(btn => btn?.addEventListener('click', doLogout));
+}
+
+function doLogout() {
+  api.clearToken();
+  state.adminUser = null;
+  state.view = 'login';
+  render();
+}
+
+// ── Main render ───────────────────────────────────────────────────────────────
+
+function render() {
+  if (!api.isAuthenticated() || state.view === 'login') {
+    renderLogin();
+    return;
+  }
+  switch (state.view) {
+    case 'dashboard':         renderDashboard(); break;
+    case 'inspectors':        renderInspectors(); break;
+    case 'inspector-detail':  renderInspectorDetail(); break;
+    case 'create-inspector':  renderCreateInspector(); break;
+    case 'inspections':       renderInspections(); break;
+    case 'inspection-detail': renderInspectionDetail(); break;
+    case 'complaints':        renderComplaints(); break;
+    default:                  renderDashboard();
+  }
+}
+
+// ── Bootstrap ─────────────────────────────────────────────────────────────────
+
 document.addEventListener('DOMContentLoaded', () => {
+  if (api.isAuthenticated()) {
+    state.view = 'dashboard';
+  }
   render();
 });
