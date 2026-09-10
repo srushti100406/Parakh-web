@@ -33,7 +33,11 @@ export function isAuthenticated() {
 // ── Core fetch wrapper ───────────────────────────────────────────────────────
 
 async function request(method, path, body = null, params = null) {
-  const url = new URL(`${BASE_URL}${path}`, window.location.origin);
+  // Build URL: if BASE_URL is set (production), use it directly as an absolute
+  // base so requests go to the backend host. If BASE_URL is empty (dev), use
+  // a relative path which Vite's dev proxy forwards to localhost:8000.
+  let urlStr = BASE_URL ? `${BASE_URL}${path}` : path;
+  const url = new URL(urlStr, window.location.href);
   if (params) {
     Object.entries(params).forEach(([k, v]) => {
       if (v !== null && v !== undefined && v !== '') url.searchParams.set(k, v);
