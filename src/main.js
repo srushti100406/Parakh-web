@@ -13,7 +13,7 @@ import * as api from './api.js';
 // ── Router / App state ───────────────────────────────────────────────────────
 
 const state = {
-  view: 'login',          // login | dashboard | inspectors | inspector-detail | create-inspector | inspections | inspection-detail | complaints
+  view: 'dashboard',      // dashboard | inspectors | inspector-detail | create-inspector | inspections | inspection-detail | complaints
   adminUser: null,        // { user_id, email }
   params: {},             // view-specific params (e.g. inspector id, inspection id)
   topbarSearch: '',
@@ -1115,17 +1115,13 @@ function bindShellEvents() {
 function doLogout() {
   api.clearToken();
   state.adminUser = null;
-  state.view = 'login';
+  state.view = 'dashboard';
   render();
 }
 
 // ── Main render ───────────────────────────────────────────────────────────────
 
 function render() {
-  if (!api.isAuthenticated() || state.view === 'login') {
-    renderLogin();
-    return;
-  }
   switch (state.view) {
     case 'dashboard':         renderDashboard(); break;
     case 'inspectors':        renderInspectors(); break;
@@ -1141,8 +1137,6 @@ function render() {
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', () => {
-  if (api.isAuthenticated()) {
-    state.view = 'dashboard';
-  }
+  state.view = 'dashboard';
   render();
 });
