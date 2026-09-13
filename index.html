@@ -5,6 +5,34 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>PARAKH Admin Portal</title>
+    <!--
+      Content Security Policy (S4)
+      - default-src 'self': only same-origin resources by default.
+      - script-src 'self': no inline scripts, no eval.
+      - style-src 'self' 'unsafe-inline' fonts.googleapis.com: Google Fonts
+        requires inline style injection; tighten to a nonce if Vite supports it.
+      - font-src 'self' fonts.gstatic.com: Google Fonts CDN.
+      - img-src 'self' data: blob: *.supabase.co: allow Supabase Storage images
+        and data URIs used for previews.
+      - connect-src 'self' *.supabase.co: API calls to backend and Supabase Auth.
+      - frame-ancestors 'none': block clickjacking in iframes.
+      - base-uri 'self': prevent base-tag injection.
+      - form-action 'self': form submissions only to same origin.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="
+        default-src 'self';
+        script-src 'self';
+        style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
+        font-src 'self' https://fonts.gstatic.com;
+        img-src 'self' data: blob: https://*.supabase.co;
+        connect-src 'self' https://*.supabase.co;
+        frame-ancestors 'none';
+        base-uri 'self';
+        form-action 'self';
+      "
+    />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap"
@@ -13,6 +41,7 @@
   </head>
   <body>
     <div id="app"></div>
+    <div id="toast-container" aria-live="polite" aria-atomic="false"></div>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>
